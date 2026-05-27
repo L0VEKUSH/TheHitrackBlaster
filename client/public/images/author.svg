@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1">
+      <stop offset="0" stop-color="#ff7a18"/>
+      <stop offset="1" stop-color="#af002d"/>
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="20" fill="#0f172a" />
+  <circle cx="60" cy="40" r="20" fill="url(#g)" />
+  <rect x="24" y="70" width="72" height="24" rx="12" fill="#0ea5a4" opacity="0.9" />
+  <text x="60" y="86" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#041024" text-anchor="middle" font-weight="700">Your Name</text>
+</svg>
