@@ -47,20 +47,40 @@ exports.getPlayersByNames = getPlayersByNames;
 
 const extractPlayerStatsFromMatch = (match) => {
   const players = {};
-  const ensure = (name) => {
-    if (!name) return null;
-    const key = name.trim();
+  const ensure = (name, id = null) => {
+    const normalizedName = name ? String(name).trim() : "";
+    const key = id ? String(id) : normalizedName;
     if (!key) return null;
     if (!players[key]) {
-      players[key] = { name: key, runs: 0, balls: 0, fours: 0, sixes: 0, wickets: 0, ballsBowled: 0, runsConceded: 0, maidens: 0, points: 0 };
+      players[key] = {
+        name: normalizedName || "Unknown",
+        _id: id || null,
+        runs: 0,
+        balls: 0,
+        fours: 0,
+        sixes: 0,
+        wickets: 0,
+        ballsBowled: 0,
+        runsConceded: 0,
+        maidens: 0,
+        points: 0,
+      };
     }
     return players[key];
   };
 
+  const getPlayerKey = (item) => {
+    if (!item) return { name: null, id: null };
+    const id = item._id || item.playerId || null;
+    return { name: item.name, id };
+  };
+
   if (match.statistics && Array.isArray(match.statistics.players) && match.statistics.players.length > 0) {
     match.statistics.players.forEach((p) => {
-      if (!p || !p.name) return;
-      const dest = ensure(p.name);
+      const { name, id } = getPlayerKey(p);
+      if (!name && !id) return;
+      const dest = ensure(name, id);
+      if (!dest) return;
       dest.runs += p.runs || 0;
       dest.balls += p.balls || 0;
       dest.fours += p.fours || 0;
@@ -78,8 +98,10 @@ const extractPlayerStatsFromMatch = (match) => {
     if (!inn) return;
     if (Array.isArray(inn.batsmen)) {
       inn.batsmen.forEach((b) => {
-        if (!b || !b.name) return;
-        const dest = ensure(b.name);
+        const { name, id } = getPlayerKey(b);
+        if (!name && !id) return;
+        const dest = ensure(name, id);
+        if (!dest) return;
         dest.runs += b.runs || 0;
         dest.balls += b.balls || 0;
         dest.fours += b.fours || 0;
@@ -88,8 +110,10 @@ const extractPlayerStatsFromMatch = (match) => {
     }
     if (Array.isArray(inn.bowlers)) {
       inn.bowlers.forEach((b) => {
-        if (!b || !b.name) return;
-        const dest = ensure(b.name);
+        const { name, id } = getPlayerKey(b);
+        if (!name && !id) return;
+        const dest = ensure(name, id);
+        if (!dest) return;
         dest.wickets += b.wickets || 0;
         dest.ballsBowled += b.balls || 0;
         dest.runsConceded += b.runs || 0;
@@ -105,9 +129,17 @@ const extractPlayerStatsFromMatch = (match) => {
 
 const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const getPointsRankings = async ({ format = "t20", limit = 20 }) => {
+const getPointsRankings = async ({ format = "T20", limit = 20, minMatches = 1 }) => {
   const query = { status: "completed" };
-  if (format) query.format = new RegExp(`^${format}$`, "i");
+  const normalizedFormat = String(format || "").trim();
+  const minMatchesNum = Math.max(1, parseInt(minMatches, 10) || 1);
+  if (normalizedFormat) {
+    if (normalizedFormat.toLowerCase() === "t20") {
+      query.format = /^t20/i;
+    } else {
+      query.format = new RegExp(`^${escapeRegExp(normalizedFormat)}$`, "i");
+    }
+  }
   const matches = await Match.find(query).lean();
   const agg = {};
 
@@ -117,7 +149,9 @@ const getPointsRankings = async ({ format = "t20", limit = 20 }) => {
       if (!p || !p.name) return;
       const name = p.name.trim();
       if (!name) return;
-      const dest = agg[name] || { name, runs: 0, balls: 0, fours: 0, sixes: 0, wickets: 0, ballsBowled: 0, runsConceded: 0, maidens: 0, points: 0 };
+      const dest = agg[name] || { name, matches: 0, runs: 0, balls: 0, fours: 0, sixes: 0, wickets: 0, ballsBowled: 0, runsConceded: 0, maidens: 0, points: 0 };
+      // count this player's appearance in the current match
+      dest.matches += 1;
       dest.runs += p.runs || 0;
       dest.balls += p.balls || 0;
       dest.fours += p.fours || 0;
@@ -145,16 +179,27 @@ const getPointsRankings = async ({ format = "t20", limit = 20 }) => {
   });
 
   players.sort((a, b) => b.points - a.points || b.wickets - a.wickets || b.runs - a.runs);
-  const topPlayers = players.slice(0, Number(limit));
-  const names = topPlayers.map((p) => p.name);
-  const details = await Player.find({ name: { $in: names } }).lean();
-  const detailMap = new Map(details.map((p) => [p.name, p]));
+  // apply minimum-match filter
+  const filtered = players.filter(p => (p.matches || 0) >= minMatchesNum);
+  const topPlayers = filtered.slice(0, Number(limit));
+
+  const ids = topPlayers.filter(p => p._id).map(p => p._id);
+  const names = topPlayers.filter(p => !p._id).map(p => p.name);
+  const details = await Player.find({
+    $or: [
+      ...(ids.length > 0 ? [{ _id: { $in: ids } }] : []),
+      ...(names.length > 0 ? [{ name: { $in: names } }] : [])
+    ]
+  }).lean();
+
+  const detailMap = new Map(details.map((p) => [p._id ? String(p._id) : p.name, p]));
 
   return topPlayers.map((p) => {
-    const detail = detailMap.get(p.name) || {};
+    const detailKey = p._id ? String(p._id) : p.name;
+    const detail = detailMap.get(detailKey) || {};
     return {
       ...p,
-      _id: detail._id || null,
+      _id: detail._id || p._id || null,
       team: detail.team || "",
       photo: detail.photo || ""
     };
@@ -403,10 +448,9 @@ exports.rebuildAllPlayerStats = async () => {
       if (!fmt) return "T20";
       const f = fmt.toUpperCase().trim();
       if (f === "T20I") return "T20";
-      if (["TEST", "RMC", "T20", "IPL"].includes(f)) {
-        if (f === "TEST") return "Test";
-        return f;
-      }
+      if (f === "TEST") return "Test";
+      if (f === "IPL" || f === "CHAMPIONSHIP") return "IPL";
+      if (["RMC", "T20"].includes(f)) return f;
       return fmt;
     };
 

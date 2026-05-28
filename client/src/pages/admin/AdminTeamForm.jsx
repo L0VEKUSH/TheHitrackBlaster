@@ -39,6 +39,7 @@ export default function AdminTeamForm() {
     founded: "", description: "",
     players: [],
     rankings: { t20Rank: 0, RMCRank: 0, testRank: 0 },
+    otherSportRankings: [],
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -59,6 +60,7 @@ export default function AdminTeamForm() {
           founded: t.founded || "", description: t.description || "",
           players: t.players?.map(p => p._id) || [],
           rankings: { t20Rank: t.rankings?.t20Rank || 0, RMCRank: t.rankings?.RMCRank || 0, testRank: t.rankings?.testRank || 0 },
+          otherSportRankings: t.otherSportRankings || [],
         });
       });
     }
@@ -91,6 +93,25 @@ export default function AdminTeamForm() {
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
   const setRnk = (k, v) => setForm(p => ({ ...p, rankings: { ...p.rankings, [k]: Number(v) } }));
+  const setOtherSportRanking = (index, key, value) => {
+    setForm(prev => {
+      const otherSportRankings = [...(prev.otherSportRankings || [])];
+      otherSportRankings[index] = { ...otherSportRankings[index], [key]: key === "rank" ? Number(value) : value };
+      return { ...prev, otherSportRankings };
+    });
+  };
+  const addOtherSportRanking = () => {
+    setForm(prev => ({
+      ...prev,
+      otherSportRankings: [...(prev.otherSportRankings || []), { sport: "", rank: 0 }]
+    }));
+  };
+  const removeOtherSportRanking = (index) => {
+    setForm(prev => ({
+      ...prev,
+      otherSportRankings: prev.otherSportRankings.filter((_, i) => i !== index)
+    }));
+  };
 
   const filteredPlayers = allPlayers.filter(p =>
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -172,6 +193,35 @@ export default function AdminTeamForm() {
                       className="input" placeholder="0" />
                   </div>
                 ))}
+              </div>
+            </Section>
+
+            <Section title="Other Sport Rankings">
+              <div className="space-y-3">
+                {(form.otherSportRankings || []).map((entry, idx) => (
+                  <div key={idx} className="grid grid-cols-12 gap-3 items-end">
+                    <div className="col-span-5">
+                      <label className="label text-[10px] uppercase">Sport</label>
+                      <input type="text" value={entry.sport} onChange={e => setOtherSportRanking(idx, "sport", e.target.value)}
+                        className="input" placeholder="e.g. Football" />
+                    </div>
+                    <div className="col-span-5">
+                      <label className="label text-[10px] uppercase">Rank</label>
+                      <input type="number" value={entry.rank} onChange={e => setOtherSportRanking(idx, "rank", e.target.value)}
+                        className="input" placeholder="0" />
+                    </div>
+                    <div className="col-span-2">
+                      <button type="button" onClick={() => removeOtherSportRanking(idx)}
+                        className="w-full h-11 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/15 transition-all text-sm font-semibold">
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                <button type="button" onClick={addOtherSportRanking}
+                  className="px-4 py-3 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-bold text-sm transition-all">
+                  + Add Other Sport Ranking
+                </button>
               </div>
             </Section>
           </div>

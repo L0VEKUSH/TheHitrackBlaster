@@ -102,11 +102,13 @@ function SecretCard({ item }) {
 
   const getNoButtonText = () => {
     const phrases = [
-      "No", "Are you sure?", "Really sure?", "Think again!",
+      "No", "Are you sure?", "Think again!",
        "Have a heart!",
       "You're breaking my heart ;(",
       "I will take care of you , i promise ❤️",
       "I will always love you ❤️",
+      "I will be here for you always ❤️",
+      "I will be your forever ❤️",
       "I will protect you from everything ❤️",
       "I will support you in every step of your life ❤️",
       "I promise that we will have a happy life together❤️",
@@ -114,7 +116,11 @@ function SecretCard({ item }) {
       "I will never leave you ❤️",
       "You are my everything ❤️",
       "I just want to spend the rest of my life with you ❤️",
-      "Please say yes ❤️"
+      "I can't imagine my life without you ❤️",
+      "I will always be here for you ❤️",
+      "I will love you more every day ❤️",
+      "Please say yes ❤️",
+      "🥹🥹🥹🥹"
     ];
     return phrases[Math.min(noCount, phrases.length - 1)];
   };
@@ -426,22 +432,22 @@ export default function AboutMePage() {
   const defaultPageData = {
     heroTitle: "I AM",
     heroName: "LOVEKUSH",
-    heroSubtitle: "Developer • Visionary • Sports Enthusiast",
+    heroSubtitle: "Developer • Visionary • Innovator",
     photo: "",
     socialLinks: {
       github: "",
       instagram: "",
       linkedin: ""
     },
-    storyHeading: "Building the Future of Sports Tracking",
+    storyHeading: "Building the Future of Connected Experiences",
     storyParagraphs: [
-      "Hi, I'm Lovekush, the mind behind The Hitrack. My journey started with a simple passion for sports and a drive to create something that brings fans closer to the game. I believe that technology should be as exciting as the sport itself.",
-      "When I'm not crafting cinematic web interfaces or building real-time scoring engines, you can find me analyzing match tactics, exploring new tech stacks, or pushing the boundaries of what's possible in web development."
+      "Hi, I'm Lovekush, the mind behind The Hitrack. My journey started with a simple passion for technology and a drive to create something that brings people closer to real-time experiences. I believe that software should be as engaging as it is reliable.",
+      "When I'm not crafting cinematic web interfaces or building interactive platforms, you can find me exploring new tech stacks, solving complex problems, or pushing the boundaries of what's possible in web development."
     ],
     stats: [
       { label: "Code Commits", value: "500+" },
       { label: "Projects Built", value: "12+" },
-      { label: "Matches Scored", value: "100+" }
+      { label: "Happy Users", value: "100+" }
     ],
     lifestyle: [
       { title: "Pure Innovation", desc: "Always looking for the 'next big thing' in UI/UX and real-time data.", icon: "code" },
@@ -449,7 +455,7 @@ export default function AboutMePage() {
       { title: "Creative Flow", desc: "Believing that code is an art form that should wow the user.", icon: "music" },
       { title: "Lish", desc: "The inspiration and anime love that drives my creative journey and pursuit of excellence.", icon: "heart" }
     ],
-    quoteText: "Building technology is like playing a match—you need precision, team spirit, and the hunger to win.",
+    quoteText: "Building technology takes precision, team spirit, and the hunger to win.",
     quoteAuthor: "— Lovekush"
   };
 

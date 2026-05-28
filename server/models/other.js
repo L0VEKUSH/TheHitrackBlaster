@@ -19,7 +19,11 @@ const teamSchema = new mongoose.Schema({
     t20Rank: { type: Number, default: 0 },
     RMCRank: { type: Number, default: 0 },
     testRank: { type: Number, default: 0 }
-  }
+  },
+  otherSportRankings: [{
+    sport: { type: String, required: true },
+    rank: { type: Number, default: 0 }
+  }]
 }, { timestamps: true });
 
 const Team = mongoose.model("Team", teamSchema);

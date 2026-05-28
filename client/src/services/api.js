@@ -87,6 +87,14 @@ export const newsAPI = {
   remove:  (id)       => api.delete(`/news/${id}`),
 };
 
+export const adminAPI = {
+  getAll:  ()           => api.get("/admins"),
+  getById: (id)         => api.get(`/admins/${id}`),
+  create:  (data)       => api.post("/admins", data),
+  update:  (id, data)   => api.put(`/admins/${id}`, data),
+  remove:  (id)         => api.delete(`/admins/${id}`),
+};
+
 // ── Tournaments ─────────────────────────────────────────────
 export const tournamentAPI = {
   getAll:       (params)   => api.get("/tournaments", { params }),

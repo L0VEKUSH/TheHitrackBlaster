@@ -56,6 +56,30 @@ export default function TeamDetailPage() {
             }
           </div>
         )}
+
+        {(team.otherSportRankings?.length || 0) > 0 && (
+          <div className="mt-6 bg-gray-900 rounded-3xl border border-gray-800 p-5">
+            <h2 className="section-title mb-4">Other Sport Rankings</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead>
+                  <tr className="border-b border-gray-800 text-gray-400 text-[11px] uppercase tracking-[0.2em]">
+                    <th className="py-3 px-4">Sport</th>
+                    <th className="py-3 px-4">Rank</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800">
+                  {team.otherSportRankings.map((entry, idx) => (
+                    <tr key={`${entry.sport}-${idx}`} className="hover:bg-gray-800/50 transition-colors">
+                      <td className="py-3 px-4 text-white">{entry.sport || "Unnamed sport"}</td>
+                      <td className="py-3 px-4 text-gray-400">#{entry.rank || 0}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       {team.players?.length > 0 && (

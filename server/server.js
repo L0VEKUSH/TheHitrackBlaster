@@ -9,7 +9,9 @@ const rateLimit = require("express-rate-limit");
 const mongoSanitize = require("express-mongo-sanitize");
 const xssClean = require("xss-clean");
 const connectDB = require("./config/db");
+const { runDatabaseBackup, startAutomaticBackups, stopAutomaticBackups } = require("./config/backupManager");
 const mongoose = require("mongoose");
+const { validatePayloadSize, sanitizeInput } = require("./middleware/validation");
 
 /* ── ENVIRONMENT VALIDATION ────────────────────────── */
 const requiredEnvVars = ["JWT_SECRET", "MONGO_URI"];
@@ -50,11 +52,19 @@ const io = new Server(server, {
 
 /* ── DATABASE INITIALIZATION WITH RETRY ────────────── */
 let dbConnected = false;
+let autoBackupsStarted = false;
 const initializeDB = async (retries = 3) => {
   try {
     await connectDB();
     dbConnected = true;
     console.log("✅ Database connected");
+
+    if (!autoBackupsStarted) {
+      const autoBackupIntervalMinutes = Number(process.env.AUTO_BACKUP_INTERVAL_MINUTES || 15);
+      const autoBackupRetention = Number(process.env.AUTO_BACKUP_RETENTION || 5);
+      startAutomaticBackups(autoBackupIntervalMinutes, autoBackupRetention);
+      autoBackupsStarted = true;
+    }
     
     // Non-blocking player stats rebuild
     try {
@@ -100,6 +110,8 @@ app.use(xssClean());
 app.use(morgan("dev"));
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: false, limit: "5mb" }));
+app.use(validatePayloadSize);
+app.use(sanitizeInput);
 
 // General Rate Limiting
 const generalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { success: false, message: "Too many requests, please try again later." } });
@@ -115,6 +127,7 @@ const matchController = require("./controllers/matchController");
 matchController.setSocket(io);
 
 app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/admins", require("./routes/adminRoutes"));
 app.use("/api/matches", require("./routes/matchRoutes"));
 app.use("/api/players", require("./routes/playerRoutes"));
 app.use("/api/teams", require("./routes/teamRoutes"));
@@ -171,6 +184,17 @@ app.use((err, req, res, _next) => {
 /* ── GRACEFUL SHUTDOWN ──────────────────────────────── */
 const gracefulShutdown = async (signal) => {
   console.log(`\n⚠️  ${signal} received. Gracefully shutting down...`);
+
+  try {
+    const backupPath = runDatabaseBackup({ label: `shutdown-${signal.toLowerCase()}` });
+    if (backupPath) {
+      console.log(`✅ Crash backup created before shutdown: ${backupPath}`);
+    }
+  } catch (err) {
+    console.error("⚠️  Failed to create crash backup during shutdown:", err.message);
+  }
+
+  stopAutomaticBackups();
   
   // Stop accepting new connections
   server.close(() => {
@@ -201,6 +225,14 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 /* ── UNHANDLED ERROR HANDLERS ──────────────────────── */
 process.on("uncaughtException", (err) => {
   console.error("❌ Uncaught Exception:", err);
+  try {
+    const backupPath = runDatabaseBackup({ label: "uncaught-exception" });
+    if (backupPath) {
+      console.log(`✅ Crash backup created after uncaught exception: ${backupPath}`);
+    }
+  } catch (backupErr) {
+    console.error("⚠️  Failed to create crash backup after uncaught exception:", backupErr.message);
+  }
   const fs = require("fs");
   fs.appendFileSync(
     require("path").join(__dirname, "error.log"),
@@ -211,6 +243,14 @@ process.on("uncaughtException", (err) => {
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+  try {
+    const backupPath = runDatabaseBackup({ label: "unhandled-rejection" });
+    if (backupPath) {
+      console.log(`✅ Crash backup created after unhandled rejection: ${backupPath}`);
+    }
+  } catch (backupErr) {
+    console.error("⚠️  Failed to create crash backup after unhandled rejection:", backupErr.message);
+  }
   const fs = require("fs");
   fs.appendFileSync(
     require("path").join(__dirname, "error.log"),

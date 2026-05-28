@@ -387,50 +387,148 @@ export default function AdminLiveScoring() {
       <div className="grid lg:grid-cols-12 gap-6">
         {/* Lineup Management */}
         <div className="lg:col-span-4 space-y-6">
-          {/* Match Statistics & Leaderboard Controls */}
-          {match?.statistics && Object.keys(match.statistics).length > 0 && (
-            <div className="card p-6 border-white/5 bg-gray-900/50">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Match Awards</h3>
-                <button className="text-[10px] text-gray-400" onClick={async () => {
-                  if (!match.tournament) return flash("No tournament set on match");
-                  try {
-                    const { data } = await tournamentAPI.rebuildLeaderboards(match.tournament);
-                    flash("✅ Leaderboards rebuilt");
-                    console.log('leaderboards', data.leaderboards);
-                  } catch (err) { flash(err.response?.data?.message || 'Rebuild failed'); }
-                }}>Rebuild Tournament Leaderboards</button>
-              </div>
-              <div className="space-y-3 text-sm">
-                <div className="flex items-center gap-2">
-                  <select value={selectedMoM} onChange={e => setSelectedMoM(e.target.value)} className="bg-black/40 rounded-xl px-3 py-2 text-sm">
-                    <option value="">Select Man of the Match</option>
-                    {/* Combine batsmen, bowlers, and roster lists for selection */}
-                    {(match.innings1?.batsmen || []).concat(match.innings2?.batsmen || []).concat(match.innings1?.bowlers || []).concat(match.innings2?.bowlers || []).filter(Boolean).map(p => (
-                      <option key={p.name} value={p.name}>{p.name}</option>
-                    ))}
-                    {(rosterA || []).concat(rosterB || []).filter(p => p && p.name).map(p => (
-                      <option key={p.name} value={p.name}>{p.name}</option>
-                    ))}
-                  </select>
-                  <button className="btn-primary px-3 py-2 rounded-xl text-xs" onClick={async () => {
-                    if (!selectedMoM) return flash('Select player first');
+          {/* ── Match Awards & MOTM Picker ────────────────── */}
+          {(() => {
+            // Compute top performers from statistics.players (sorted by points desc)
+            const statPlayers = Array.isArray(match?.statistics?.players)
+              ? [...match.statistics.players].sort((a, b) => (b.points || 0) - (a.points || 0))
+              : [];
+            const topPerformers = statPlayers.slice(0, 5);  // show top 5 for admin to pick
+            const currentMoM = match?.statistics?.manOfTheMatch;
+
+            const saveMoM = async (name, points) => {
+              try {
+                const reason = points !== undefined ? `${points} match pts` : 'Selected by admin';
+                const { data } = await matchAPI.setManOfTheMatch(id, { name, reason });
+                setMatch(data.match);
+                flash('🏆 Man of the Match set — ' + name);
+              } catch (err) { flash(err.response?.data?.message || 'Save failed'); }
+            };
+
+            const topPts = topPerformers[0]?.points || 0;
+            const isTied = topPerformers.filter(p => p.points === topPts).length > 1;
+
+            return (
+              <div className="card p-6 border-white/5 bg-gray-900/50">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">🏆 Man of the Match</h3>
+                  <button className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors" onClick={async () => {
+                    if (!match.tournament) return flash("No tournament set on match");
                     try {
-                      const { data } = await matchAPI.setManOfTheMatch(id, { name: selectedMoM, reason: 'Selected by admin' });
-                      setMatch(data.match);
-                      flash('✅ Man of the Match set');
-                    } catch (err) { flash(err.response?.data?.message || 'Save failed'); }
-                  }}>Save MoM</button>
+                      await tournamentAPI.rebuildLeaderboards(match.tournament);
+                      flash("✅ Leaderboards rebuilt");
+                    } catch (err) { flash(err.response?.data?.message || 'Rebuild failed'); }
+                  }}>Rebuild Leaderboards</button>
                 </div>
 
-                {match.statistics.manOfTheMatch && <div><strong>MoM:</strong> {match.statistics.manOfTheMatch.name} ({match.statistics.manOfTheMatch.reason || ''})</div>}
-                {match.statistics.sixerKing && <div><strong>Sixes:</strong> {match.statistics.sixerKing.name} — {match.statistics.sixerKing.sixes}</div>}
-                {match.statistics.fourKing && <div><strong>Fours:</strong> {match.statistics.fourKing.name} — {match.statistics.fourKing.fours}</div>}
-                {match.statistics.highestStrikeRate && <div><strong>SR:</strong> {match.statistics.highestStrikeRate.name} — {match.statistics.highestStrikeRate.strikeRate}</div>}
-                {match.statistics.bestEconomy && <div><strong>Eco:</strong> {match.statistics.bestEconomy.name} — {match.statistics.bestEconomy.economy}</div>}
+                {/* Current MOTM badge */}
+                {currentMoM?.name && (
+                  <div className="flex items-center gap-3 mb-4 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/25">
+                    <span className="text-2xl">🏆</span>
+                    <div>
+                      <div className="text-yellow-400 font-black text-sm">{currentMoM.name}</div>
+                      <div className="text-yellow-600 text-[10px] font-bold uppercase tracking-wider">{currentMoM.reason || 'Man of the Match'}</div>
+                    </div>
+                    <button onClick={() => saveMoM("", "")} className="ml-auto text-[9px] text-gray-600 hover:text-red-400 font-bold uppercase transition-colors">Clear</button>
+                  </div>
+                )}
+
+                {/* Tie warning */}
+                {isTied && topPts > 0 && (
+                  <div className="mb-3 text-[10px] font-black text-orange-400 uppercase tracking-widest bg-orange-500/10 border border-orange-500/20 rounded-xl px-3 py-2">
+                    ⚠️ Tie — {topPerformers.filter(p=>p.points===topPts).length} players on {topPts} pts · Admin must decide
+                  </div>
+                )}
+
+                {/* Top performer cards */}
+                {topPerformers.length > 0 ? (
+                  <div className="space-y-2 mb-4">
+                    {topPerformers.map((p, idx) => {
+                      const isSelected = currentMoM?.name === p.name;
+                      const isTiedPlayer = p.points === topPts && isTied;
+                      return (
+                        <button
+                          key={p.name}
+                          onClick={() => saveMoM(p.name, p.points)}
+                          className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left ${
+                            isSelected
+                              ? 'bg-yellow-500/15 border-yellow-500/40 shadow-lg shadow-yellow-500/10'
+                              : isTiedPlayer
+                              ? 'bg-orange-500/10 border-orange-500/30 hover:bg-orange-500/20'
+                              : 'bg-white/5 border-white/5 hover:bg-white/10 hover:border-white/15'
+                          }`}
+                        >
+                          {/* Rank badge */}
+                          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-black shrink-0 ${
+                            idx === 0 ? 'bg-yellow-500 text-black' :
+                            idx === 1 ? 'bg-gray-400 text-black' :
+                            idx === 2 ? 'bg-amber-700 text-white' :
+                            'bg-white/10 text-gray-400'
+                          }`}>
+                            {isTiedPlayer ? '=' : `#${idx + 1}`}
+                          </div>
+
+                          {/* Name & stats */}
+                          <div className="flex-1 min-w-0">
+                            <div className="text-white text-xs font-black truncate">{p.name}</div>
+                            <div className="text-gray-500 text-[9px] font-bold mt-0.5 flex gap-2 flex-wrap">
+                              {p.runs > 0 && <span className="text-green-400">{p.runs}R</span>}
+                              {p.balls > 0 && <span>{p.balls}B</span>}
+                              {p.fours > 0 && <span>{p.fours}×4</span>}
+                              {p.sixes > 0 && <span className="text-purple-400">{p.sixes}×6</span>}
+                              {p.wickets > 0 && <span className="text-red-400">{p.wickets}W</span>}
+                              {p.ballsBowled > 0 && <span>Eco {p.economy ?? '—'}</span>}
+                            </div>
+                          </div>
+
+                          {/* Points */}
+                          <div className="text-right shrink-0">
+                            <div className={`text-base font-black ${isSelected ? 'text-yellow-400' : isTiedPlayer ? 'text-orange-400' : 'text-brand-400'}`}>{p.points ?? 0}</div>
+                            <div className="text-[8px] font-bold text-gray-600 uppercase">pts</div>
+                          </div>
+
+                          {isSelected && <span className="text-yellow-400 text-base shrink-0">🏆</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="text-center text-gray-600 text-xs py-4 italic">No stats yet — play some balls first</div>
+                )}
+
+                {/* Manual override dropdown for players not in top 5 */}
+                <details className="mt-2">
+                  <summary className="text-[10px] text-gray-500 font-bold uppercase tracking-widest cursor-pointer hover:text-gray-300 transition-colors">Override — Pick any player ▾</summary>
+                  <div className="flex items-center gap-2 mt-3">
+                    <select value={selectedMoM} onChange={e => setSelectedMoM(e.target.value)} className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-sm text-white">
+                      <option value="">Select player…</option>
+                      {[...new Map(
+                        (match.innings1?.batsmen || []).concat(match.innings2?.batsmen || [])
+                        .concat(match.innings1?.bowlers || []).concat(match.innings2?.bowlers || [])
+                        .concat(rosterA || []).concat(rosterB || [])
+                        .filter(Boolean).map(p => [p.name, p])
+                      ).values()].map(p => (
+                        <option key={p.name} value={p.name}>{p.name}</option>
+                      ))}
+                    </select>
+                    <button className="btn-primary px-4 py-2 rounded-xl text-xs shrink-0" onClick={async () => {
+                      if (!selectedMoM) return flash('Select player first');
+                      await saveMoM(selectedMoM, undefined);
+                    }}>Set</button>
+                  </div>
+                </details>
+
+                {/* Other awards */}
+                <div className="mt-4 pt-4 border-t border-white/5 space-y-2 text-xs">
+                  {match.statistics.sixerKing && <div className="flex justify-between text-gray-400"><span>💥 Sixer King</span><span className="text-white font-bold">{match.statistics.sixerKing.name} — {match.statistics.sixerKing.sixes} sixes</span></div>}
+                  {match.statistics.fourKing && <div className="flex justify-between text-gray-400"><span>🔥 Four King</span><span className="text-white font-bold">{match.statistics.fourKing.name} — {match.statistics.fourKing.fours} fours</span></div>}
+                  {match.statistics.highestStrikeRate && <div className="flex justify-between text-gray-400"><span>⚡ Best SR</span><span className="text-white font-bold">{match.statistics.highestStrikeRate.name} — {match.statistics.highestStrikeRate.strikeRate}</span></div>}
+                  {match.statistics.bestEconomy && <div className="flex justify-between text-gray-400"><span>🎳 Best Eco</span><span className="text-white font-bold">{match.statistics.bestEconomy.name} — {match.statistics.bestEconomy.economy}</span></div>}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
+
           <div className="card p-6 border-white/5 bg-gray-900/50">
             <div className="flex justify-between items-center mb-6">
               <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Active Batsmen</h3>

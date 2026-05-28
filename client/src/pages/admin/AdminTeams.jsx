@@ -41,6 +41,7 @@ export default function AdminTeams() {
                 <tr className="border-b border-white/5 bg-black/20">
                   <th className="py-6 px-8 text-[10px] font-black text-gray-500 uppercase tracking-widest">Team</th>
                   <th className="py-6 px-8 text-[10px] font-black text-gray-500 uppercase tracking-widest">Commanding Officer</th>
+                  <th className="py-6 px-8 text-[10px] font-black text-gray-500 uppercase tracking-widest">Other Sports</th>
                   <th className="py-6 px-8 text-[10px] font-black text-gray-500 uppercase tracking-widest text-right">Actions</th>
                 </tr>
               </thead>
@@ -65,6 +66,18 @@ export default function AdminTeams() {
                     </td>
                     <td className="py-6 px-8">
                        <span className="text-[10px] font-black text-gray-300 uppercase italic tracking-tighter">{t.captain || "UNASSIGNED"}</span>
+                    </td>
+                    <td className="py-6 px-8 text-sm text-gray-300 space-y-1">
+                      {t.otherSportRankings?.length > 0 ? (
+                        t.otherSportRankings.map((entry, idx) => (
+                          <div key={`${t._id}-${entry.sport}-${idx}`} className="inline-flex flex-wrap gap-2 items-center rounded-lg bg-white/5 px-3 py-2">
+                            <span className="font-semibold text-white">{entry.sport || "Sport"}</span>
+                            <span className="text-xs text-gray-400">#{entry.rank || 0}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <span className="text-gray-600">None</span>
+                      )}
                     </td>
                     <td className="py-6 px-8">
                       <div className="flex items-center justify-end gap-3">

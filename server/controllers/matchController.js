@@ -74,7 +74,7 @@ exports.getLiveMatches = async (req, res) => {
 exports.createMatch = async (req, res) => {
   try {
     const match = await Match.create(req.body);
-    if (req.body.tournament) await Tournament.findByIdAndUpdate(req.body.tournament, { $push: { matches: match._id } });
+    if (req.body.tournament) await Tournament.findByIdAndUpdate(req.body.tournament, { $addToSet: { matches: match._id } });
     res.status(201).json({ success: true, match });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -90,8 +90,17 @@ exports.updateMatch = async (req, res) => {
     const updateData = {};
     Object.keys(req.body).forEach(key => { if (allowed.includes(key)) updateData[key] = req.body[key]; });
 
+    const existingMatch = await Match.findById(req.params.id);
+    if (!existingMatch) return res.status(404).json({ success: false, message: "Match not found" });
+
+    if (req.body.tournament && String(req.body.tournament) !== String(existingMatch.tournament)) {
+      await Tournament.findByIdAndUpdate(existingMatch.tournament, { $pull: { matches: existingMatch._id } });
+      await Tournament.findByIdAndUpdate(req.body.tournament, { $addToSet: { matches: existingMatch._id } });
+    } else if (req.body.tournament === null && existingMatch.tournament) {
+      await Tournament.findByIdAndUpdate(existingMatch.tournament, { $pull: { matches: existingMatch._id } });
+    }
+
     const match = await Match.findByIdAndUpdate(req.params.id, updateData, { new: true, runValidators: true });
-    if (!match) return res.status(404).json({ success: false, message: "Match not found" });
     emit(match._id, match);
     if (match.status === "completed") {
       try { await rebuildAllPlayerStats(); } catch (e) { console.error("Failed to rebuild player stats", e); }
@@ -105,12 +114,13 @@ exports.deleteMatch = async (req, res) => {
     const match = await Match.findByIdAndDelete(req.params.id);
     if (!match) return res.status(404).json({ success: false, message: "Match not found" });
     
-    // Rebuild points table if match belonged to a tournament
+    // Remove the deleted match from the tournament roster and rebuild standings
     if (match.tournament) {
       try {
+        await Tournament.findByIdAndUpdate(match.tournament, { $pull: { matches: match._id } });
         await rebuildPointsTable(match.tournament);
       } catch (e) {
-        console.error("Failed to rebuild points table after match deletion", e);
+        console.error("Failed to update tournament after match deletion", e);
       }
     }
     
@@ -769,6 +779,52 @@ exports.declareInnings = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
+const inferResultState = (match) => {
+  const resStr = (match.result || "").toLowerCase();
+
+  if (resStr.includes("abandon") || resStr.includes("no result")) {
+    return { winner: null, isTie: false, isNR: true };
+  }
+
+  if (resStr.includes("won")) {
+    const teamA = (match.teamA || "").toLowerCase();
+    const teamB = (match.teamB || "").toLowerCase();
+    const teamAShort = (match.teamAShort || "").toLowerCase();
+    const teamBShort = (match.teamBShort || "").toLowerCase();
+
+    if (teamA && (resStr.includes(teamA) || (teamAShort && resStr.includes(teamAShort)))) {
+      return { winner: match.teamA, isTie: false, isNR: false };
+    }
+    if (teamB && (resStr.includes(teamB) || (teamBShort && resStr.includes(teamBShort)))) {
+      return { winner: match.teamB, isTie: false, isNR: false };
+    }
+  }
+
+  if (resStr.includes("tie")) {
+    return { winner: null, isTie: true, isNR: false };
+  }
+
+  if (match.isSuperOver) {
+    const so1 = match.superOverInnings1 || {};
+    const so2 = match.superOverInnings2 || {};
+    const so1Runs = Number(so1.runs || 0);
+    const so2Runs = Number(so2.runs || 0);
+
+    if (so1Runs > so2Runs) return { winner: so1.battingTeam || match.teamA, isTie: false, isNR: false };
+    if (so2Runs > so1Runs) return { winner: so2.battingTeam || match.teamB, isTie: false, isNR: false };
+    if (so1Runs > 0 || so2Runs > 0) return { winner: null, isTie: true, isNR: false };
+  }
+
+  const r1 = Number(match.innings1?.runs || 0);
+  const r2 = Number(match.innings2?.runs || 0);
+
+  if (r1 > r2) return { winner: match.innings1?.battingTeam || match.teamA, isTie: false, isNR: false };
+  if (r2 > r1) return { winner: match.innings2?.battingTeam || match.teamB, isTie: false, isNR: false };
+  if (r1 > 0 || r2 > 0) return { winner: null, isTie: true, isNR: false };
+
+  return { winner: null, isTie: false, isNR: true };
+};
+
 const rebuildPointsTable = async (tournamentId) => {
   if (!tournamentId) return;
   try {
@@ -781,28 +837,9 @@ const rebuildPointsTable = async (tournamentId) => {
     });
 
     tourney.matches.forEach(m => {
-      if (m.status !== "completed") return;
+      if (!m || m.status !== "completed") return;
       
-      let winner = null;
-      let isTie = false;
-      let isNR = false;
-
-      const resStr = (m.result || "").toLowerCase();
-      if (resStr.includes("won")) {
-        if (resStr.includes(m.teamA.toLowerCase()) || (m.teamAShort && resStr.includes(m.teamAShort.toLowerCase()))) winner = m.teamA;
-        else if (resStr.includes(m.teamB.toLowerCase()) || (m.teamBShort && resStr.includes(m.teamBShort.toLowerCase()))) winner = m.teamB;
-      } else if (resStr.includes("tie")) {
-        isTie = true;
-      } else if (resStr.includes("abandon") || resStr.includes("no result")) {
-        isNR = true;
-      } else {
-        const r1 = m.innings1?.runs || 0;
-        const r2 = m.innings2?.runs || 0;
-        if (r1 > r2) winner = m.innings1?.battingTeam;
-        else if (r2 > r1) winner = m.innings2?.battingTeam;
-        else if (r1 > 0 && r2 > 0) isTie = true;
-        else isNR = true;
-      }
+      const { winner, isTie, isNR } = inferResultState(m);
 
       const tA = m.teamA;
       const tB = m.teamB;

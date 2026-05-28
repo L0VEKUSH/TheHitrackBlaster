@@ -1,6 +1,7 @@
 // src/pages/TournamentDetailPage.jsx
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 import { tournamentAPI, playerAPI, teamAPI } from "../services/api";
 import Spinner from "../components/common/Spinner";
 import { TabBar } from "../components/common/Spinner";
@@ -33,85 +34,144 @@ function computeTournamentLeaders(matches) {
   const bat  = {};
   const bowl = {};
 
-  const finishBatEntry = (entry) => {
-    const strikeRate = entry.balls > 0 ? (entry.runs / entry.balls) * 100 : 0;
-    const average    = entry.outs  > 0 ? (entry.runs / entry.outs)        : entry.runs;
-    return { ...entry, strikeRate: parseFloat(strikeRate.toFixed(1)), average: parseFloat(average.toFixed(2)) };
+  const normalizeName = (value) => {
+    const name = String(value || "").trim();
+    return name === "" ? null : name;
   };
 
-  matches.forEach(m => {
-    [m.innings1, m.innings2].forEach(inn => {
-      if (!inn) return;
+  const getBowlingTeam = (match, battingTeam) => {
+    if (!match || !battingTeam) return null;
+    if (match.teamA && match.teamB) {
+      return match.teamA === battingTeam ? match.teamB : match.teamA;
+    }
+    return null;
+  };
 
-      (inn.batsmen || []).forEach(p => {
-        if (!p?.name) return;
-        const key   = p.name;
-        const entry = bat[key] || { name: key, runs: 0, balls: 0, inns: 0, outs: 0, fours: 0, sixes: 0, hundreds: 0, fifties: 0, thirties: 0, bestScore: 0 };
-        const score = p.runs || 0;
-        entry.runs     += score;
-        entry.balls    += p.balls || 0;
-        entry.inns     += 1;
-        if (p.isOut)     entry.outs += 1;
-        entry.fours    += p.fours || 0;
-        entry.sixes    += p.sixes || 0;
-        if (score > entry.bestScore)  entry.bestScore = score;
-        if (score >= 100)             entry.hundreds  += 1;
-        else if (score >= 50)         entry.fifties   += 1;
-        else if (score >= 30)         entry.thirties  += 1;
+  const finishBatEntry = (entry) => {
+    const strikeRate = entry.balls > 0 ? (entry.runs / entry.balls) * 100 : 0;
+    const average    = entry.outs > 0 ? (entry.runs / entry.outs) : entry.runs;
+    return {
+      ...entry,
+      strikeRate: parseFloat(strikeRate.toFixed(1)),
+      average: parseFloat(average.toFixed(2)),
+    };
+  };
+
+  matches.forEach((m) => {
+    [m.innings1, m.innings2].forEach((inn) => {
+      if (!inn) return;
+      const battingTeam = normalizeName(inn.battingTeam);
+
+      (Array.isArray(inn.batsmen) ? inn.batsmen : []).forEach((p) => {
+        const name = normalizeName(p?.name);
+        if (!name) return;
+
+        const key = battingTeam ? `${name}||${battingTeam}` : name;
+        const entry = bat[key] || {
+          key,
+          name,
+          team: battingTeam || undefined,
+          runs: 0,
+          balls: 0,
+          inns: 0,
+          outs: 0,
+          fours: 0,
+          sixes: 0,
+          hundreds: 0,
+          fifties: 0,
+          thirties: 0,
+          bestScore: 0,
+        };
+
+        const score = Number(p.runs) || 0;
+        entry.runs += score;
+        entry.balls += Number(p.balls) || 0;
+        entry.inns += 1;
+        if (p.isOut === true) entry.outs += 1;
+        entry.fours += Number(p.fours) || 0;
+        entry.sixes += Number(p.sixes) || 0;
+        if (score > entry.bestScore) entry.bestScore = score;
+        if (score >= 100) entry.hundreds += 1;
+        else if (score >= 50) entry.fifties += 1;
+        else if (score >= 30) entry.thirties += 1;
+
         bat[key] = entry;
       });
 
-      (inn.bowlers || []).forEach(p => {
-        if (!p?.name) return;
-        const key   = p.name;
-        const entry = bowl[key] || { name: key, wickets: 0, runs: 0, balls: 0, fiveWickets: 0, bestFigures: { wickets: 0, runs: 999 } };
-        const wickets = p.wickets || 0;
-        const runs    = p.runs    || 0;
-        const balls   = p.balls   || 0;
+      (Array.isArray(inn.bowlers) ? inn.bowlers : []).forEach((p) => {
+        const name = normalizeName(p?.name);
+        if (!name) return;
+
+        const bowlingTeam = getBowlingTeam(m, battingTeam) || undefined;
+        const key = bowlingTeam ? `${name}||${bowlingTeam}` : name;
+        const entry = bowl[key] || {
+          key,
+          name,
+          team: bowlingTeam,
+          wickets: 0,
+          runs: 0,
+          balls: 0,
+          fiveWickets: 0,
+          bestFigures: { wickets: 0, runs: 999 },
+        };
+
+        const wickets = Number(p.wickets) || 0;
+        const runs = Number(p.runs) || 0;
+        const balls = Number(p.balls) || 0;
+
         entry.wickets += wickets;
-        entry.runs    += runs;
-        entry.balls   += balls;
+        entry.runs += runs;
+        entry.balls += balls;
         if (wickets >= 5) entry.fiveWickets += 1;
         if (wickets > entry.bestFigures.wickets || (wickets === entry.bestFigures.wickets && runs < entry.bestFigures.runs)) {
           entry.bestFigures = { wickets, runs };
         }
+
         bowl[key] = entry;
       });
     });
   });
 
   const batsmen = Object.values(bat).map(finishBatEntry);
-  const bowlers = Object.values(bowl).map(p => ({
+  const bowlers = Object.values(bowl).map((p) => ({
     ...p,
-    overs:   p.balls > 0 ? parseFloat((p.balls / 6).toFixed(1)) : 0,
+    overs: p.balls > 0 ? parseFloat((p.balls / 6).toFixed(1)) : 0,
     economy: p.balls > 0 ? parseFloat((p.runs / (p.balls / 6)).toFixed(2)) : null,
     average: p.wickets > 0 ? parseFloat((p.runs / p.wickets).toFixed(2)) : null,
   }));
 
   return {
-    mostRuns:           batsmen.slice().sort((a,b) => b.runs - a.runs).slice(0, 10),
-    highestScore:       batsmen.slice().sort((a,b) => b.bestScore - a.bestScore).slice(0, 10),
-    bestBattingAverage: batsmen.slice().filter(p => p.outs > 0).sort((a,b) => b.average - a.average).slice(0, 10),
-    bestStrikeRate:     batsmen.slice().filter(p => p.balls >= 10).sort((a,b) => b.strikeRate - a.strikeRate).slice(0, 10),
-    mostHundreds:       batsmen.slice().sort((a,b) => b.hundreds - a.hundreds || b.runs - a.runs).slice(0, 10),
-    mostFifties:        batsmen.slice().sort((a,b) => b.fifties  - a.fifties  || b.runs - a.runs).slice(0, 10),
-    mostThirties:       batsmen.slice().sort((a,b) => b.thirties - a.thirties || b.runs - a.runs).slice(0, 10),
-    mostSixes:          batsmen.slice().sort((a,b) => b.sixes - a.sixes).slice(0, 10),
-    mostFours:          batsmen.slice().sort((a,b) => b.fours - a.fours).slice(0, 10),
-    mostWickets:        bowlers.slice().sort((a,b) => b.wickets - a.wickets).slice(0, 10),
-    bestEconomy:        bowlers.slice().filter(p => p.balls >= 6).sort((a,b) => (a.economy ?? 999) - (b.economy ?? 999)).slice(0, 10),
-    bestBowlingAverage: bowlers.slice().filter(p => p.wickets > 0).sort((a,b) => a.average - b.average).slice(0, 10),
-    bestBowling:        bowlers.slice().sort((a,b) => b.bestFigures.wickets - a.bestFigures.wickets || a.bestFigures.runs - b.bestFigures.runs).slice(0, 10),
-    mostFiveWickets:    bowlers.slice().sort((a,b) => b.fiveWickets - a.fiveWickets || b.wickets - a.wickets).slice(0, 10),
+    mostRuns: batsmen.slice().sort((a, b) => b.runs - a.runs).slice(0, 10),
+    highestScore: batsmen.slice().sort((a, b) => b.bestScore - a.bestScore).slice(0, 10),
+    bestBattingAverage: batsmen.slice().filter((p) => p.inns > 0).sort((a, b) => b.average - a.average).slice(0, 10),
+    bestStrikeRate: batsmen.slice().filter((p) => p.balls >= 10).sort((a, b) => b.strikeRate - a.strikeRate).slice(0, 10),
+    mostHundreds: batsmen.slice().sort((a, b) => b.hundreds - a.hundreds || b.runs - a.runs).slice(0, 10),
+    mostFifties: batsmen.slice().sort((a, b) => b.fifties - a.fifties || b.runs - a.runs).slice(0, 10),
+    mostThirties: batsmen.slice().sort((a, b) => b.thirties - a.thirties || b.runs - a.runs).slice(0, 10),
+    mostSixes: batsmen.slice().sort((a, b) => b.sixes - a.sixes).slice(0, 10),
+    mostFours: batsmen.slice().sort((a, b) => b.fours - a.fours).slice(0, 10),
+    mostWickets: bowlers.slice().sort((a, b) => b.wickets - a.wickets).slice(0, 10),
+    bestEconomy: bowlers.slice().filter((p) => p.balls >= 6).sort((a, b) => (a.economy ?? 999) - (b.economy ?? 999)).slice(0, 10),
+    bestBowlingAverage: bowlers.slice().filter((p) => p.wickets > 0).sort((a, b) => a.average - b.average).slice(0, 10),
+    bestBowling: bowlers.slice().sort((a, b) => b.bestFigures.wickets - a.bestFigures.wickets || a.bestFigures.runs - b.bestFigures.runs).slice(0, 10),
+    mostFiveWickets: bowlers.slice().sort((a, b) => b.fiveWickets - a.fiveWickets || b.wickets - a.wickets).slice(0, 10),
   };
 }
 
 // ── Main Component ────────────────────────────────────────────────────────
 export default function TournamentDetailPage() {
   const { id } = useParams();
+  const { isAdmin } = useAuth();
   const [tournament, setTournament] = useState(null);
   const [loading,    setLoading]    = useState(true);
   const [tab,        setTab]        = useState("matches");
+
+  // Make sure non-admin users cannot stay on the hidden points tab
+  useEffect(() => {
+    if (!isAdmin && tab === "points") {
+      setTab("matches");
+    }
+  }, [isAdmin, tab]);
 
   // Leaders state
   const [leaderCat,  setLeaderCat]  = useState("mostRuns");
@@ -124,10 +184,7 @@ export default function TournamentDetailPage() {
       .finally(() => setLoading(false));
   }, [id]);
 
-  if (loading) return <Spinner size="lg" />;
-  if (!tournament) return <div className="text-center py-16 text-gray-400">Tournament not found</div>;
-
-  const matches   = tournament.matches || [];
+  const matches   = tournament?.matches || [];
   const live      = matches.filter(m => m.status === "live");
   const upcoming  = matches.filter(m => m.status === "upcoming");
   const completed = matches.filter(m => m.status === "completed");
@@ -170,6 +227,9 @@ export default function TournamentDetailPage() {
   const activeCat = allCats.find(c => c.key === leaderCat) || BATTING_CATEGORIES[0];
   const activeList = leaders[leaderCat] || [];
 
+  if (loading) return <Spinner size="lg" />;
+  if (!tournament) return <div className="text-center py-16 text-gray-400">Tournament not found</div>;
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-6">
       {/* ── Header ─────────────────────────────────────── */}
@@ -202,9 +262,9 @@ export default function TournamentDetailPage() {
           <TabBar
             tabs={[
               { label: `Matches (${matches.length})`, value: "matches" },
-              { label: "Points Table",                value: "points"  },
-              { label: "Leaders",                     value: "leaders" },
-              { label: "Rules",                       value: "rules"   },
+              ...(isAdmin ? [{ label: "Points Table", value: "points" }] : []),
+              { label: "Leaders", value: "leaders" },
+              { label: "Rules", value: "rules" },
             ]}
             active={tab}
             onChange={setTab}
@@ -358,8 +418,9 @@ export default function TournamentDetailPage() {
                         const pid  = playersMap[p.name];
                         const val  = activeCat.getValue(p);
                         const extra = activeCat.extra(p);
+                        const playerLabel = p.team ? `${p.name} • ${p.team}` : p.name;
                         return (
-                          <tr key={p.name}
+                          <tr key={p.key || `${p.name}-${p.team || "unknown"}`}
                             className={`border-b border-gray-800/40 transition-colors hover:bg-gray-800/30 ${i === 0 ? "bg-brand-500/5" : ""}`}
                           >
                             {/* Rank */}
@@ -375,9 +436,9 @@ export default function TournamentDetailPage() {
                               {pid
                                 ? <Link to={`/players/${pid}`}
                                     className="font-semibold text-brand-400 hover:text-brand-300 hover:underline transition-colors">
-                                    {p.name}
+                                    {playerLabel}
                                   </Link>
-                                : <span className="font-semibold text-white">{p.name}</span>
+                                : <span className="font-semibold text-white">{playerLabel}</span>
                               }
                             </td>
 
