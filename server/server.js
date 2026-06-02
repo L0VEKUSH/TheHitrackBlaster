@@ -9,7 +9,7 @@ const rateLimit = require("express-rate-limit");
 const mongoSanitize = require("express-mongo-sanitize");
 const xssClean = require("xss-clean");
 const connectDB = require("./config/db");
-const { runDatabaseBackup, startAutomaticBackups, stopAutomaticBackups } = require("./config/backupManager");
+const { runDatabaseBackup, startAutomaticBackups, stopAutomaticBackups, canRunBackups } = require("./config/backupManager");
 const mongoose = require("mongoose");
 const { validatePayloadSize, sanitizeInput } = require("./middleware/validation");
 
@@ -18,25 +18,86 @@ const requiredEnvVars = ["JWT_SECRET", "MONGO_URI"];
 const missing = requiredEnvVars.filter(v => !process.env[v]);
 if (missing.length > 0) {
   console.error(`❌ Missing environment variables: ${missing.join(", ")}`);
-  process.exit(1);
 }
 
 const app = express();
 const server = http.createServer(app);
-const allowedOrigins = (process.env.CLIENT_URL || "http://localhost:5173")
-  .split(",")
-  .map((url) => url.trim())
+const defaultOrigins = [
+  "http://localhost:5173",
+  "https://the-hitrack-blaster-2clhawl0e-lovekush-kumar-s-projects.vercel.app",
+  "https://the-hitrack-blaster-33exmbtlr-lovekush-kumar-s-projects.vercel.app",
+  "https://*.vercel.app",
+  "https://*.onrender.com"
+];
+const rawOrigins = [
+  ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : []),
+  ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : []),
+  ...defaultOrigins
+]
+  .map((url) => url.trim().replace(/\/+$|\/$/g, "").toLowerCase())
   .filter(Boolean);
+const allowedOrigins = Array.from(new Set(rawOrigins));
+const allowAllOrigins = process.env.ALLOW_ALL_ORIGINS === "true" || allowedOrigins.includes("*");
+
+const normalizeOrigin = (origin) => origin?.trim().replace(/\/+$/g, "");
+const wildcardMatch = (origin, pattern) => {
+  if (!pattern.includes("*")) return false;
+  const escapedPattern = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  return new RegExp(`^${escapedPattern}$`, "i").test(origin);
+};
+const isOriginAllowed = (origin) => {
+  if (!origin || allowAllOrigins) return true;
+  const normalizedOrigin = normalizeOrigin(origin).toLowerCase();
+  return allowedOrigins.some((pattern) => {
+    const normalizedPattern = normalizeOrigin(pattern).toLowerCase();
+    if (normalizedPattern === normalizedOrigin) return true;
+    return wildcardMatch(normalizedOrigin, normalizedPattern);
+  });
+};
+
+// Debug: show configured allowed origins at startup
+console.log(
+  "🔧 Configured allowedOrigins:",
+  allowAllOrigins ? "* (all origins allowed)" : allowedOrigins.join(", "),
+  "allowAllOrigins:",
+  allowAllOrigins
+);
+
+// Ensure a default port is set to avoid ReferenceError on startup
+const PORT = process.env.PORT || 5000;
 
 /* ── SOCKET.IO WITH ERROR HANDLING ──────────────────── */
+// CORS origin check function used by both Express and Socket.IO
+const corsOrigin = (origin, callback) => {
+  if (isOriginAllowed(origin)) {
+    return callback(null, true);
+  }
+
+  // Log denied origin for debugging
+  try {
+    console.warn(`🚫 CORS denied for origin: ${origin} | allowedOrigins: ${allowedOrigins.join(", ")}`);
+  } catch (e) {
+    // ignore
+  }
+  callback(new Error("CORS origin denied"));
+};
+
+app.use((req, res, next) => {
+  if (req.url.includes("//")) {
+    const normalizedUrl = req.url.replace(/\/{2,}/g, "/");
+    if (normalizedUrl !== req.url) {
+      console.log("🔧 Normalizing request URL:", req.url, "->", normalizedUrl);
+      req.url = normalizedUrl;
+    }
+  }
+  next();
+});
+
 const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      callback(new Error("CORS origin denied"));
-    },
+    origin: corsOrigin,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     credentials: true
   },
@@ -62,7 +123,12 @@ const initializeDB = async (retries = 3) => {
     if (!autoBackupsStarted) {
       const autoBackupIntervalMinutes = Number(process.env.AUTO_BACKUP_INTERVAL_MINUTES || 15);
       const autoBackupRetention = Number(process.env.AUTO_BACKUP_RETENTION || 5);
-      startAutomaticBackups(autoBackupIntervalMinutes, autoBackupRetention);
+      // Only start automatic backups when the environment supports it
+      if (canRunBackups()) {
+        startAutomaticBackups(autoBackupIntervalMinutes, autoBackupRetention);
+      } else {
+        console.warn("⚠️ Automatic backups disabled: mongodump not available and no S3 configured");
+      }
       autoBackupsStarted = true;
     }
     
@@ -84,27 +150,45 @@ const initializeDB = async (retries = 3) => {
       await new Promise(resolve => setTimeout(resolve, 5000));
       return initializeDB(retries - 1);
     }
-    console.error("❌ Failed to connect to database after 3 attempts");
-    process.exit(1);
+    console.error("❌ Failed to connect to database after 3 attempts — starting server without DB connection. Requests depending on DB will return 503 until connection is restored.");
+    // Do not exit here; allow server to start and return 503 for API calls until DB becomes available.
   }
 };
 
-initializeDB();
+
 
 app.set("trust proxy", 1);
 app.use(helmet());
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      callback(new Error("CORS origin denied"));
-    },
-    credentials: true,
-    optionsSuccessStatus: 200
-  })
-);
+const corsOptions = {
+  origin: allowAllOrigins ? true : corsOrigin,
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+  preflightContinue: false
+};
+
+app.use(cors(corsOptions));
+// Ensure explicit OPTIONS preflight responses are served using the same options
+app.options("*", cors(corsOptions));
+
+// Always echo back allowed origins so browsers receive the CORS headers
+app.use((req, res, next) => {
+  const requestOrigin = req.headers.origin;
+  try {
+    if (requestOrigin && isOriginAllowed(requestOrigin)) {
+      res.setHeader("Access-Control-Allow-Origin", requestOrigin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With");
+      res.setHeader("Vary", "Origin");
+    }
+  } catch (e) {
+    // swallow errors here to avoid breaking request flow
+  }
+  next();
+});
+
 app.use(mongoSanitize());
 app.use(xssClean());
 app.use(morgan("dev"));
@@ -112,6 +196,21 @@ app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: false, limit: "5mb" }));
 app.use(validatePayloadSize);
 app.use(sanitizeInput);
+
+// Block API requests when DB is not connected
+// Block API requests when DB is not connected, but allow preflight OPTIONS through
+app.use((req, res, next) => {
+  // Allow CORS preflight to be handled by the cors middleware
+  if (req.method === "OPTIONS") return next();
+
+  // Allow health checks through even when DB is not connected
+  if (req.path === "/api/health") return next();
+
+  if (!dbConnected && req.path.startsWith("/api")) {
+    return res.status(503).json({ success: false, message: "Service temporarily unavailable (database not connected)" });
+  }
+  next();
+});
 
 // General Rate Limiting
 const generalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { success: false, message: "Too many requests, please try again later." } });
@@ -139,11 +238,37 @@ app.use("/api/about-me", require("./routes/aboutMeRoutes"));
 app.use("/api/upload", require("./routes/uploadRoutes"));
 
 const path = require("path");
+const uploadsPath = path.join(__dirname, "public", "uploads");
+app.use("/uploads", express.static(uploadsPath));
+app.use("/uploads", (req, res) => {
+  res.sendFile(path.join(uploadsPath, "default.png"), err => {
+    if (err) {
+      res.status(404).json({ success: false, message: "Image not found" });
+    }
+  });
+});
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/health", (req, res) =>
   res.json({ status: "ok", uptime: process.uptime(), time: new Date() })
 );
+
+app.get("/api/debug/cors", (req, res) => {
+  const requestOrigin = req.headers.origin || null;
+  const originAllowed = requestOrigin ? isOriginAllowed(requestOrigin) : false;
+  res.json({
+    success: true,
+    requestOrigin,
+    originAllowed,
+    allowAllOrigins,
+    allowedOrigins,
+    env: {
+      CLIENT_URL: process.env.CLIENT_URL || null,
+      ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || null,
+      NODE_ENV: process.env.NODE_ENV || null
+    }
+  });
+});
 
 app.use((req, res) =>
   res.status(404).json({ success: false, message: "Route not found" })
@@ -274,7 +399,14 @@ setInterval(() => {
   }
 }, 60000); // Check every minute
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () =>
-  console.log(`🚀 The Hitrack blaster→ http://localhost:${PORT}`)
-);
+const startServer = async () => {
+  // Initialize DB in background but don't block server start permanently
+  initializeDB().catch(err => console.error("DB init error:", err && err.message));
+
+  console.log(`Configured allowed origins: ${allowAllOrigins ? "* (all origins)" : allowedOrigins.join(", ")}`);
+  server.listen(PORT, () => {
+    console.log(`🚀 The Hitrack blaster running on port ${PORT}`);
+  });
+};
+
+startServer();

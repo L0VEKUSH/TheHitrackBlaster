@@ -1,13 +1,37 @@
 // src/services/api.js
 import axios from "axios";
 
-const API_URL = import.meta.env.VITE_API_URL || "";
-const api = axios.create({ baseURL: `${API_URL}/api` });
+const normalizeApiUrl = (url) => {
+  if (typeof url !== "string") return url;
+  const protocolIndex = url.indexOf("://");
+  if (protocolIndex !== -1) {
+    const protocol = url.slice(0, protocolIndex + 3);
+    const rest = url.slice(protocolIndex + 3).replace(/\/{2,}/g, "/");
+    return `${protocol}${rest}`;
+  }
+  return url.replace(/\/{2,}/g, "/");
+};
+
+// Normalize API URL to avoid double-slash issues. Use empty string for relative API paths.
+const rawApiUrl = import.meta.env.VITE_API_URL || "";
+const API_URL = rawApiUrl.trim().replace(/\/+$|\/$/g, "");
+let baseURL = API_URL ? `${API_URL}/api` : "/api";
+baseURL = normalizeApiUrl(baseURL);
+const api = axios.create({ baseURL });
+
+// If you use cookies for auth, enable credentials; otherwise keep it false.
+// Uncomment the following line if backend uses cookie-based auth:
+// api.defaults.withCredentials = true;
 
 // Attach token automatically
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("cs_token");
   if (token) config.headers.Authorization = `Bearer ${token}`;
+
+  if (config && typeof config.url === "string") {
+    config.url = normalizeApiUrl(config.url);
+  }
+
   return config;
 });
 
