@@ -12,9 +12,10 @@ const normalizeApiUrl = (url) => {
   return url.replace(/\/{2,}/g, "/");
 };
 
-// Normalize API URL to avoid double-slash issues. Use empty string for relative API paths.
+// Normalize API URL to avoid double-slash and double-/api issues.
+// Accept VITE_API_URL as either https://host or https://host/api
 const rawApiUrl = import.meta.env.VITE_API_URL || "";
-const API_URL = rawApiUrl.trim().replace(/\/+$|\/$/g, "");
+const API_URL = rawApiUrl.trim().replace(/\/+$|\/$/g, "").replace(/\/api$/i, "");
 let baseURL = API_URL ? `${API_URL}/api` : "/api";
 baseURL = normalizeApiUrl(baseURL);
 const api = axios.create({ baseURL });

@@ -46,8 +46,9 @@ export function useLiveMatch(matchId) {
     fetchMatch();
 
     // Socket connection with error handling
-    const socketUrl = import.meta.env.VITE_API_URL || window.location.origin;
-    
+    const rawSocketUrl = import.meta.env.VITE_API_URL || window.location.origin;
+    const socketUrl = rawSocketUrl.trim().replace(/\/+$/g, "").replace(/\/api$/i, "") || window.location.origin;
+
     socketRef.current = io(socketUrl, {
       path: "/socket.io",
       reconnection: true,

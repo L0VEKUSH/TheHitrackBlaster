@@ -17,7 +17,17 @@ export default function AdminSetup() {
       localStorage.setItem("cs_token", data.token);
       localStorage.setItem("cs_admin", JSON.stringify(data.admin));
       navigate("/admin");
-    } catch (err) { setError(err.response?.data?.message || "Setup failed"); }
+    } catch (err) {
+      const status = err.response?.status;
+      const msg = err.response?.data?.message;
+      if (status === 404) {
+        setError(msg || "API route not found. Set VITE_API_URL to https://thehitrackblaster.onrender.com (without /api) and redeploy the frontend.");
+      } else if (status === 403) {
+        setError(msg || "Invalid setup secret. Copy SETUP_SECRET exactly from Render → Environment.");
+      } else {
+        setError(msg || "Setup failed");
+      }
+    }
     finally { setLoading(false); }
   };
 
@@ -31,7 +41,7 @@ export default function AdminSetup() {
         </div>
         <form onSubmit={handle} className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
           {error && <div className="bg-red-900/30 border border-red-700 text-red-400 text-sm px-3 py-2 rounded-lg">{error}</div>}
-          {[["Name","text","name","Admin Name"],["Email","email","email","admin@example.com"],["Password","password","password","Min 6 characters"],["Setup Secret","password","setupSecret","Enter secret from .env"]].map(([l,t,k,ph]) => (
+          {[["Name","text","name","Admin Name"],["Email","email","email","admin@example.com"],["Password","password","password","Min 6 characters"],["Setup Secret","password","setupSecret","Exact SETUP_SECRET from Render env"]].map(([l,t,k,ph]) => (
             <div key={k}>
               <label className="label">{l}</label>
               <input type={t} value={form[k]} placeholder={ph}

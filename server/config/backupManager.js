@@ -31,14 +31,24 @@ const runDatabaseBackup = ({ outputPath, label } = {}) => {
     return null;
   }
 
-  const backupRoot = createBackupDir(outputPath);
+  if (!canRunBackups()) {
+    console.error("❌ Automatic backups are unavailable because mongodump is not installed or configured.");
+    return null;
+  }
+
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backupDir = path.join(backupRoot, label ? `backup-${label}-${timestamp}` : `backup-${timestamp}`);
+  const backupRoot = outputPath ? path.resolve(outputPath) : ensureBackupRoot();
+  const finalDir = outputPath
+    ? backupRoot
+    : path.join(backupRoot, label ? `backup-${label}-${timestamp}` : `backup-${timestamp}`);
+  const tempDir = outputPath
+    ? path.join(path.dirname(backupRoot), `.tmp-backup-${timestamp}-${Math.random().toString(36).slice(2, 8)}`)
+    : path.join(backupRoot, `.tmp-backup-${timestamp}-${Math.random().toString(36).slice(2, 8)}`);
 
   backupInProgress = true;
   try {
-    fs.mkdirSync(backupDir, { recursive: true });
-    const result = spawnSync("mongodump", ["--uri", process.env.MONGO_URI, "--out", backupDir], {
+    fs.mkdirSync(tempDir, { recursive: true });
+    const result = spawnSync("mongodump", ["--uri", process.env.MONGO_URI, "--out", tempDir], {
       stdio: "pipe",
       shell: false
     });
@@ -59,12 +69,33 @@ const runDatabaseBackup = ({ outputPath, label } = {}) => {
       return null;
     }
 
-    console.log(`✅ Database backup completed at ${backupDir}`);
+    fs.renameSync(tempDir, finalDir);
+    console.log(`✅ Database backup completed at ${finalDir}`);
     pruneOldBackups(backupRoot);
-    return backupDir;
+    return finalDir;
+  } catch (err) {
+    if (fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+    throw err;
   } finally {
     backupInProgress = false;
   }
+};
+
+const isMongodumpAvailable = () => {
+  try {
+    const result = spawnSync("mongodump", ["--version"], { stdio: "ignore", shell: false });
+    return !result.error && result.status === 0;
+  } catch (err) {
+    return false;
+  }
+};
+
+const canRunBackups = () => {
+  // Allow backups when an external S3 bucket is configured or mongodump is available
+  if (process.env.AUTO_BACKUP_S3_BUCKET) return true;
+  return isMongodumpAvailable();
 };
 
 const pruneOldBackups = (backupRoot, maxBackups = Number(process.env.AUTO_BACKUP_RETENTION || 5)) => {
@@ -89,6 +120,11 @@ const pruneOldBackups = (backupRoot, maxBackups = Number(process.env.AUTO_BACKUP
 };
 
 const startAutomaticBackups = (intervalMinutes = Number(process.env.AUTO_BACKUP_INTERVAL_MINUTES || 15), maxBackups = Number(process.env.AUTO_BACKUP_RETENTION || 5)) => {
+  if (!canRunBackups()) {
+    console.warn("⚠️  Automatic backups are disabled because mongodump is not installed or AUTO_BACKUP_S3_BUCKET is not configured.");
+    return null;
+  }
+
   if (backupTimer) {
     clearInterval(backupTimer);
   }
@@ -118,4 +154,6 @@ module.exports = {
   pruneOldBackups,
   ensureBackupRoot,
   defaultBackupRoot
+  ,isMongodumpAvailable,
+  canRunBackups
 };

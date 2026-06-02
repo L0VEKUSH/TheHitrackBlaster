@@ -10,5 +10,17 @@ export default defineConfig({
       "/uploads":   { target: "http://localhost:5000", changeOrigin: true },
       "/socket.io": { target: "http://localhost:5000", ws: true }
     }
+  },
+  build: {
+    chunkSizeWarningLimit: 3000,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            return 'vendor';
+          }
+        }
+      }
+    }
   }
 });

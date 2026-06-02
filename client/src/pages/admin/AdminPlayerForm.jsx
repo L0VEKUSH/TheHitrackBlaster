@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { playerAPI } from "../../services/api";
-import axios from "axios";
+import api, { playerAPI, teamAPI } from "../../services/api";
 import dayjs from "dayjs";
 import { FiImage } from "react-icons/fi";
 
@@ -43,7 +42,7 @@ export default function AdminPlayerForm() {
 
   useEffect(() => {
     // Fetch teams for selection
-    axios.get("/api/teams").then(({ data }) => {
+    teamAPI.getAll().then(({ data }) => {
       setAllTeams(data.teams || []);
     });
 
@@ -74,11 +73,9 @@ export default function AdminPlayerForm() {
 
     setUploading(true);
     try {
-      const token = localStorage.getItem("cs_token");
-      const { data } = await axios.post("/api/upload/image", formData, {
+      const { data } = await api.post("/upload/image", formData, {
         headers: { 
-          "Content-Type": "multipart/form-data",
-          "Authorization": `Bearer ${token}`
+          "Content-Type": "multipart/form-data"
         }
       });
       if (data.success) set("photo", data.imageUrl);

@@ -1,0 +1,29 @@
+name: Regenerate client lockfile (Linux)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  regenerate-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Regenerate client package-lock.json
+        working-directory: client
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install --package-lock-only
+
+      - name: Commit and push lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add client/package-lock.json
+          git diff --staged --quiet || (git commit -m "chore: regenerate client package-lock.json (linux)" && git push)

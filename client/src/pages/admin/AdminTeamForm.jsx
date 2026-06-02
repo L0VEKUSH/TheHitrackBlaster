@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { teamAPI, playerAPI } from "../../services/api";
-import axios from "axios";
+import api, { teamAPI, playerAPI } from "../../services/api";
 import { FiImage, FiX } from "react-icons/fi";
 
 const TYPES = ["Teams", "domestic", "Tournament Teams"];
@@ -73,9 +72,8 @@ export default function AdminTeamForm() {
     formData.append("image", file);
     setUploading(true);
     try {
-      const token = localStorage.getItem("cs_token");
-      const { data } = await axios.post("/api/upload/image", formData, {
-        headers: { "Content-Type": "multipart/form-data", "Authorization": `Bearer ${token}` }
+      const { data } = await api.post("/upload/image", formData, {
+        headers: { "Content-Type": "multipart/form-data" }
       });
       if (data.success) set(type, data.imageUrl);
     } catch (err) { alert("Upload failed"); }

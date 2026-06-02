@@ -10,10 +10,12 @@ exports.adminSetup = async (req, res) => {
   try {
     const count = await Admin.countDocuments();
     if (count > 0) return res.status(400).json({ success: false, message: "Admin already exists. Use /admin/login." });
-    const { name, email, password, setupSecret } = req.body;
+    const { name, password, setupSecret } = req.body;
+    const email = req.body.email?.trim().toLowerCase();
     if (!name || !email || !password) return res.status(400).json({ success: false, message: "All fields required" });
-    if (process.env.SETUP_SECRET && setupSecret !== process.env.SETUP_SECRET) {
-      return res.status(403).json({ success: false, message: "Invalid setup secret" });
+    const envSecret = process.env.SETUP_SECRET?.trim();
+    if (envSecret && setupSecret?.trim() !== envSecret) {
+      return res.status(403).json({ success: false, message: "Invalid setup secret. Use the SETUP_SECRET value from your Render environment variables." });
     }
     const admin = await Admin.create({ name, email, password, role: "superadmin" });
     const token = signToken(admin._id, "admin");
@@ -24,7 +26,8 @@ exports.adminSetup = async (req, res) => {
 // POST /api/auth/admin/login
 exports.adminLogin = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = req.body.email?.trim().toLowerCase();
+    const { password } = req.body;
     if (!email || !password) return res.status(400).json({ success: false, message: "Email and password required" });
     const admin = await Admin.findOne({ email, isActive: true });
     if (!admin || !(await admin.matchPassword(password)))
