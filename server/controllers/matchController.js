@@ -478,13 +478,8 @@ exports.updateScore = async (req, res) => {
       try { await rebuildAllPlayerStats(); } catch (e) { console.error("Failed to rebuild player stats", e); }
     }
 
-    if (isOverComplete) {
-      try {
-        await generateOverPoll(match);
-      } catch (e) {
-        console.error("Failed to generate over poll:", e);
-      }
-    }
+    // Poll generation is handled asynchronously below (non-blocking) to reduce
+    // latency and avoid score-response failures during over-completion.
 
     emit(match._id, match);
     if (match.tournament) await rebuildPointsTable(match.tournament);
