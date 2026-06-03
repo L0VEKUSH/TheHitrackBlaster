@@ -4,50 +4,122 @@
  * Validate match score update to prevent invalid cricket data
  */
 exports.validateScoreUpdate = (req, res, next) => {
-  const { action, data } = req.body;
+  const body = req.body || {};
 
-  if (!action) {
-    return res.status(400).json({ success: false, message: "Action required" });
-  }
+  // Backward-compatible contract: some clients send { action, data }
+  if (body.action) {
+    const { action, data } = body;
 
-  try {
-    switch (action) {
-      case "runs":
-        if (typeof data?.runs !== "number" || data.runs < 0 || data.runs > 6) {
-          return res.status(400).json({ success: false, message: "Runs must be 0-6" });
+    try {
+      switch (action) {
+        case "runs": {
+          if (typeof data?.runs !== "number" || data.runs < 0 || data.runs > 6) {
+            return res.status(400).json({ success: false, message: "Runs must be 0-6" });
+          }
+          if (typeof data?.wicket !== "boolean") {
+            return res.status(400).json({ success: false, message: "Wicket flag required" });
+          }
+          break;
         }
-        if (typeof data?.wicket !== "boolean") {
-          return res.status(400).json({ success: false, message: "Wicket flag required" });
-        }
-        break;
 
-      case "wicket":
-        if (!data?.batsmanName || !data?.bowlerName || !data?.dismissalType) {
-          return res.status(400).json({ success: false, message: "Wicket details incomplete" });
+        case "wicket": {
+          if (!data?.batsmanName || !data?.bowlerName || !data?.dismissalType) {
+            return res.status(400).json({ success: false, message: "Wicket details incomplete" });
+          }
+          break;
         }
-        break;
 
-      case "extras":
-        if (!["wide", "no-ball", "bye", "leg-bye"].includes(data?.type)) {
-          return res.status(400).json({ success: false, message: "Invalid extra type" });
+        case "extras": {
+          if (!["wide", "no-ball", "bye", "leg-bye"].includes(data?.type)) {
+            return res.status(400).json({ success: false, message: "Invalid extra type" });
+          }
+          if (typeof data?.runs !== "number" || data.runs < 0) {
+            return res.status(400).json({ success: false, message: "Invalid extra runs" });
+          }
+          break;
         }
-        if (typeof data?.runs !== "number" || data.runs < 0) {
-          return res.status(400).json({ success: false, message: "Invalid extra runs" });
-        }
-        break;
 
-      case "completedMatch":
-        if (!data?.result || typeof data.result !== "string") {
-          return res.status(400).json({ success: false, message: "Match result required" });
+        case "completedMatch": {
+          if (!data?.result || typeof data.result !== "string") {
+            return res.status(400).json({ success: false, message: "Match result required" });
+          }
+          break;
         }
-        break;
+
+        default:
+          return res.status(400).json({ success: false, message: "Unknown action" });
+      }
+
+      return next();
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid request data" });
     }
-
-    next();
-  } catch (err) {
-    res.status(400).json({ success: false, message: "Invalid request data" });
   }
+
+  // New contract (used by AdminLiveScoring.jsx): flat score payload.
+  // Required core fields
+  const { inningsNum, runs, isWicket, extraType, wicketType, batterName, bowlerName, outPlayerName } = body;
+
+  // inningsNum must exist and be 1 or 2 (or super-over innings handling is handled downstream)
+  if (inningsNum !== 1 && inningsNum !== 2) {
+    return res.status(400).json({ success: false, message: "inningsNum must be 1 or 2" });
+  }
+
+  // runs must be a finite number (frontend passes number-like values)
+  const normalizedRuns = typeof runs === "number" ? runs : Number(runs);
+  if (!Number.isFinite(normalizedRuns) || normalizedRuns < 0 || normalizedRuns > 6) {
+    return res.status(400).json({ success: false, message: "runs must be a number between 0 and 6" });
+  }
+  req.body.runs = normalizedRuns;
+
+  if (typeof isWicket !== "boolean") {
+    return res.status(400).json({ success: false, message: "isWicket flag required" });
+  }
+
+  // extraType validation (align to frontend naming)
+  if (extraType !== null && extraType !== undefined && extraType !== "") {
+    // Normalize middleware naming to match what the frontend actually sends
+    // (frontend uses noBall/legBye; some older clients might send no-ball/leg-bye)
+    const normalizedExtraType =
+      extraType === "no-ball" ? "noBall" :
+      extraType === "leg-bye" ? "legBye" :
+      extraType;
+
+    req.body.extraType = normalizedExtraType;
+
+    const allowed = ["wide", "noBall", "bye", "legBye", "bonus", "penalty"];
+    if (!allowed.includes(normalizedExtraType)) {
+      return res.status(400).json({ success: false, message: "Invalid extraType" });
+    }
+  }
+
+
+  // When wicket is true, require wicketType and out player
+  if (isWicket) {
+    if (!wicketType) {
+      return res.status(400).json({ success: false, message: "wicketType required for wicket" });
+    }
+    if (!bowlerName) {
+      return res.status(400).json({ success: false, message: "bowlerName required for wicket" });
+    }
+    const dismissed = outPlayerName || batterName;
+    if (!dismissed) {
+      return res.status(400).json({ success: false, message: "outPlayerName (or batterName) required for wicket" });
+    }
+  }
+
+  // For non-wicket balls, require striker/bowler names when provided by frontend
+  if (!bowlerName) {
+    return res.status(400).json({ success: false, message: "bowlerName is required" });
+  }
+  if (!batterName && !isWicket) {
+    return res.status(400).json({ success: false, message: "batterName is required" });
+  }
+
+  // Accept extra payload fields (commentary, fielderName, etc.)
+  return next();
 };
+
 
 /**
  * Validate tournament ID existence and format
