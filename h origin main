@@ -1,0 +1,5 @@
+[33m95c649e[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mblackboxai/poll-second-main[m[33m, [m[1;31morigin/blackboxai/poll-second-main[m[33m)[m Fix auto polls to switch to 2nd main player when repeating
+[33mfa9322c[m[33m ([m[1;31morigin/main[m[33m, [m[1;32mmain[m[33m)[m Latest fixes
+[33m7daf95d[m Latest fixes
+[33me6b13ff[m Fix admin setup secret debugging
+[33m0616c3b[m fix: CORS policy wildcard subdomains and api double-slashes
