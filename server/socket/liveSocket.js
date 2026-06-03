@@ -8,18 +8,19 @@ module.exports = (io) => {
     // Join a specific match room for live updates
     socket.on("joinMatch", (matchId, callback) => {
       try {
-        if (!matchId || typeof matchId !== "string") {
+        const roomId = matchId != null ? String(matchId).trim() : "";
+        if (!roomId) {
           return callback?.({ error: "Invalid match ID" });
         }
 
-        socket.join(String(matchId));
+        socket.join(roomId);
         
         // Track active watchers per match
-        const key = String(matchId);
+        const key = roomId;
         const current = activeMatches.get(key) || 0;
         activeMatches.set(key, current + 1);
 
-        console.log(`   ↳ joined match room: ${matchId} (viewers: ${current + 1})`);
+        console.log(`   ↳ joined match room: ${roomId} (viewers: ${current + 1})`);
         callback?.({ success: true });
       } catch (err) {
         console.error("❌ Error in joinMatch:", err.message);

@@ -105,7 +105,7 @@ const io = new Server(server, {
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,
   reconnectionAttempts: 5,
-  transports: ["websocket", "polling"],
+  transports: ["polling", "websocket"],
   pingInterval: 25000,
   pingTimeout: 60000,
   maxHttpBufferSize: 1e6

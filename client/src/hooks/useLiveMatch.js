@@ -49,14 +49,16 @@ export function useLiveMatch(matchId) {
     const rawSocketUrl = import.meta.env.VITE_API_URL || window.location.origin;
     const socketUrl = rawSocketUrl.trim().replace(/\/+$/g, "").replace(/\/api$/i, "") || window.location.origin;
 
+    // Polling first — Render and some proxies close WebSocket before it is established
     socketRef.current = io(socketUrl, {
       path: "/socket.io",
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       reconnectionAttempts: 10,
-      transports: ["websocket", "polling"],
-      reconnectTimer: 3000
+      transports: ["polling", "websocket"],
+      upgrade: true,
+      timeout: 20000,
     });
 
     // Connection handlers
@@ -64,7 +66,7 @@ export function useLiveMatch(matchId) {
       if (isMountedRef.current) {
         setIsConnected(true);
         retryCountRef.current = 0;
-        socketRef.current?.emit("joinMatch", matchId, (callback) => {
+        socketRef.current?.emit("joinMatch", String(matchId), (callback) => {
           if (callback?.error) {
             console.error("Failed to join match room:", callback.error);
           }
@@ -81,9 +83,18 @@ export function useLiveMatch(matchId) {
     };
 
     const handleScoreUpdate = (updatedMatch) => {
-      if (isMountedRef.current && updatedMatch) {
-        setMatch(updatedMatch);
-      }
+      if (!isMountedRef.current || !updatedMatch) return;
+      // Live score payloads often omit statistics; keep previous awards/stats
+      setMatch((prev) => {
+        const hasStats =
+          updatedMatch.statistics &&
+          typeof updatedMatch.statistics === "object" &&
+          Object.keys(updatedMatch.statistics).length > 0;
+        return {
+          ...updatedMatch,
+          statistics: hasStats ? updatedMatch.statistics : prev?.statistics,
+        };
+      });
     };
 
     const handleError = (error) => {
@@ -109,21 +120,21 @@ export function useLiveMatch(matchId) {
     socketRef.current.on("error", handleError);
     socketRef.current.on("reconnect_attempt", handleReconnectAttempt);
 
+    const socket = socketRef.current;
+
     // Cleanup
     return () => {
-      if (socketRef.current) {
-        socketRef.current?.emit("leaveMatch", matchId, (callback) => {
-          if (callback?.error) {
-            console.error("Failed to leave match room:", callback.error);
-          }
-        });
-        socketRef.current.off("connect", handleConnect);
-        socketRef.current.off("disconnect", handleDisconnect);
-        socketRef.current.off("scoreUpdate", handleScoreUpdate);
-        socketRef.current.off("error", handleError);
-        socketRef.current.off("reconnect_attempt", handleReconnectAttempt);
-        socketRef.current?.disconnect();
+      if (!socket) return;
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+      socket.off("scoreUpdate", handleScoreUpdate);
+      socket.off("error", handleError);
+      socket.off("reconnect_attempt", handleReconnectAttempt);
+      if (socket.connected) {
+        socket.emit("leaveMatch", String(matchId));
       }
+      socket.disconnect();
+      if (socketRef.current === socket) socketRef.current = null;
     };
   }, [matchId]);
 

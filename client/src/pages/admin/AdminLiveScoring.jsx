@@ -520,10 +520,24 @@ export default function AdminLiveScoring() {
 
                 {/* Other awards */}
                 <div className="mt-4 pt-4 border-t border-white/5 space-y-2 text-xs">
-                  {match.statistics.sixerKing && <div className="flex justify-between text-gray-400"><span>💥 Sixer King</span><span className="text-white font-bold">{match.statistics.sixerKing.name} — {match.statistics.sixerKing.sixes} sixes</span></div>}
-                  {match.statistics.fourKing && <div className="flex justify-between text-gray-400"><span>🔥 Four King</span><span className="text-white font-bold">{match.statistics.fourKing.name} — {match.statistics.fourKing.fours} fours</span></div>}
-                  {match.statistics.highestStrikeRate && <div className="flex justify-between text-gray-400"><span>⚡ Best SR</span><span className="text-white font-bold">{match.statistics.highestStrikeRate.name} — {match.statistics.highestStrikeRate.strikeRate}</span></div>}
-                  {match.statistics.bestEconomy && <div className="flex justify-between text-gray-400"><span>🎳 Best Eco</span><span className="text-white font-bold">{match.statistics.bestEconomy.name} — {match.statistics.bestEconomy.economy}</span></div>}
+                  {match.statistics?.sixerKing?.name && (
+                    <div className="flex justify-between text-gray-400">
+                      <span>💥 Sixer King</span>
+                      <span className="text-white font-bold">
+                        {match.statistics.sixerKing.name} — {match.statistics.sixerKing.sixes ?? 0} sixes
+                      </span>
+                    </div>
+                  )}
+                  {match.statistics?.fourKing && <div className="flex justify-between text-gray-400"><span>🔥 Four King</span><span className="text-white font-bold">{match.statistics.fourKing.name} — {match.statistics.fourKing.fours} fours</span></div>}
+                  {(match.statistics?.highestStrikeRate || match.statistics?.bestStrikeRate) && (
+                    <div className="flex justify-between text-gray-400">
+                      <span>⚡ Best SR</span>
+                      <span className="text-white font-bold">
+                        {(match.statistics.highestStrikeRate || match.statistics.bestStrikeRate).name} — {(match.statistics.highestStrikeRate || match.statistics.bestStrikeRate).strikeRate}
+                      </span>
+                    </div>
+                  )}
+                  {match.statistics?.bestEconomy && <div className="flex justify-between text-gray-400"><span>🎳 Best Eco</span><span className="text-white font-bold">{match.statistics.bestEconomy.name} — {match.statistics.bestEconomy.economy}</span></div>}
                 </div>
               </div>
             );
