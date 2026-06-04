@@ -183,6 +183,7 @@ exports.updateScore = async (req, res) => {
     const isBye = extraType === "bye";
     const isLegBye = extraType === "legBye";
     const isLegal = !isWide && !isNoBall;
+    const currentBallOverStr = `${Math.floor(inn.balls / 6)}.${(inn.balls % 6) + 1}`;
 
     // Sync the striker based on the frontend's manual selection
     if (batterName) {
@@ -273,7 +274,7 @@ exports.updateScore = async (req, res) => {
            const mType = String(bat.runs);
            inn.milestones ||= [];
            if (!inn.milestones.some(m => m.player === bat.name && m.type === mType)) {
-              inn.milestones.push({ player: bat.name, type: mType, over: `${Math.floor(inn.balls/6)}.${inn.balls%6}`, score: `${inn.runs}/${inn.wickets}` });
+              inn.milestones.push({ player: bat.name, type: mType, over: currentBallOverStr, score: `${inn.runs}/${inn.wickets}` });
               inn.commentary.unshift({ over: "", text: `🏏 MILESTONE: ${bat.name} reaches ${bat.runs}!`, runs: 0, isWicket: false });
            }
         }
@@ -310,7 +311,7 @@ exports.updateScore = async (req, res) => {
         inn.wickets++;
         inn.fallOfWickets.push({
           score: `${inn.runs}/${inn.wickets}`,
-          over: `${Math.floor(inn.balls / 6)}.${inn.balls % 6}`,
+          over: currentBallOverStr,
           player: dismissedPlayerName,
           wicketNum: inn.wickets
         });
@@ -323,7 +324,7 @@ exports.updateScore = async (req, res) => {
             const mType = `${w}W`;
             inn.milestones ||= [];
             if (!inn.milestones.some(m => m.player === bwl.name && m.type === mType)) {
-              inn.milestones.push({ player: bwl.name, type: mType, over: `${Math.floor(inn.balls/6)}.${inn.balls%6}`, score: `${inn.runs}/${inn.wickets}` });
+              inn.milestones.push({ player: bwl.name, type: mType, over: currentBallOverStr, score: `${inn.runs}/${inn.wickets}` });
               inn.commentary.unshift({ over: "", text: `⭐ MILESTONE: ${bwl.name} has taken ${w} wickets!`, runs: 0, isWicket: false });
             }
           }
@@ -378,7 +379,15 @@ exports.updateScore = async (req, res) => {
       }
     }
 
-    // 6. Strike Rotation at End of Over & Maiden Calculation
+    // 6. Commentary (Always push to maintain the undo stack)
+    const autoText = commentary || `${r} run${r !== 1 ? 's' : ''}${isWicket ? ' OUT' : ''}${extraType ? ` (${extraType})` : ''}`;
+    inn.commentary.unshift({
+      over: currentBallOverStr,
+      text: autoText, runs: r, isWicket: !!isWicket, extraType,
+      batterName, bowlerName
+    });
+
+    // 7. Strike Rotation at End of Over & Maiden Calculation
     const isOverComplete = isLegal && (inn.balls % 6 === 0) && (extraType !== "bonus" && extraType !== "penalty");
     if (isOverComplete) {
       rotateStrike = !rotateStrike;
@@ -424,14 +433,6 @@ exports.updateScore = async (req, res) => {
         active[1].isStriker = !active[1].isStriker;
       }
     }
-
-    // 6. Commentary (Always push to maintain the undo stack)
-    const autoText = commentary || `${r} run${r !== 1 ? 's' : ''}${isWicket ? ' OUT' : ''}${extraType ? ` (${extraType})` : ''}`;
-    inn.commentary.unshift({
-      over: `${Math.floor(inn.balls / 6)}.${inn.balls % 6}`,
-      text: autoText, runs: r, isWicket: !!isWicket, extraType,
-      batterName, bowlerName
-    });
 
     // 7. Automatic Completion Logic
     const maxWickets = match.isSuperOver ? 2 : 10;
