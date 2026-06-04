@@ -178,6 +178,12 @@ exports.updateScore = async (req, res) => {
     const inn = match[key];
     if (!inn) return res.status(400).json({ success: false, message: "Innings not initialized" });
 
+    const isWide = extraType === "wide";
+    const isNoBall = extraType === "noBall";
+    const isBye = extraType === "bye";
+    const isLegBye = extraType === "legBye";
+    const isLegal = !isWide && !isNoBall;
+
     // Sync the striker based on the frontend's manual selection
     if (batterName) {
       inn.batsmen.forEach(b => {
@@ -187,7 +193,10 @@ exports.updateScore = async (req, res) => {
       });
     }
 
-    if (inn.balls > 0 && inn.balls % 6 === 0) {
+    // Consecutive-over and quota checks only apply at the START of a new legal over
+    // (must be a legal delivery — wides/no-balls don't complete an over)
+    const isNewLegalOver = inn.balls > 0 && inn.balls % 6 === 0 && !isWide && !isNoBall;
+    if (isNewLegalOver) {
       if (inn.lastOverBowler === bowlerName) {
         return res.status(400).json({ success: false, message: "A bowler cannot bowl consecutive overs. Please change the bowler." });
       }
@@ -196,22 +205,22 @@ exports.updateScore = async (req, res) => {
         const bwl = inn.bowlers.find(b => b.name === bowlerName);
         if (bwl) {
           let maxOversPerBowler = Math.ceil((match.overs || 20) / 5);
-          
+
           // Track Blaster Championship Rules
           if (match.series && match.series.toLowerCase().includes("track blaster")) {
-             if (match.format === "T8") maxOversPerBowler = 3;
-             if (match.format === "T10") maxOversPerBowler = 3;
-             
-             // Check if bowler is starting their 3rd over (they have 12 balls)
-             if (bwl.balls >= 12) {
-                 const otherBowlersWith3 = inn.bowlers.filter(b => b.name !== bowlerName && b.balls >= 12).length;
-                 if (match.format === "T8" && otherBowlersWith3 >= 1) {
-                     return res.status(400).json({ success: false, message: "Track Blaster Rule: Only 1 bowler can bowl 3 overs in T-8." });
-                 }
-                 if (match.format === "T10" && otherBowlersWith3 >= 2) {
-                     return res.status(400).json({ success: false, message: "Track Blaster Rule: Only 2 bowlers can bowl 3 overs in T-10." });
-                 }
-             }
+            if (match.format === "T8") maxOversPerBowler = 3;
+            if (match.format === "T10") maxOversPerBowler = 3;
+
+            // Check if bowler is starting their 3rd over (they have 12 balls)
+            if (bwl.balls >= 12) {
+              const otherBowlersWith3 = inn.bowlers.filter(b => b.name !== bowlerName && b.balls >= 12).length;
+              if (match.format === "T8" && otherBowlersWith3 >= 1) {
+                return res.status(400).json({ success: false, message: "Track Blaster Rule: Only 1 bowler can bowl 3 overs in T-8." });
+              }
+              if (match.format === "T10" && otherBowlersWith3 >= 2) {
+                return res.status(400).json({ success: false, message: "Track Blaster Rule: Only 2 bowlers can bowl 3 overs in T-10." });
+              }
+            }
           }
 
           if (bwl.balls >= maxOversPerBowler * 6) {
@@ -224,12 +233,6 @@ exports.updateScore = async (req, res) => {
     let r = Number(runs);
     const wicketBall = isWicket && !["runOut", "retired-hurt", "retired-out"].includes(wicketType);
     if (wicketBall) r = 0;
-
-    const isWide = extraType === "wide";
-    const isNoBall = extraType === "noBall";
-    const isBye = extraType === "bye";
-    const isLegBye = extraType === "legBye";
-    const isLegal = !isWide && !isNoBall;
 
     // 1. Update Team Score & Extras
     if (extraType === "penalty") {
@@ -250,7 +253,8 @@ exports.updateScore = async (req, res) => {
       }
     }
 
-    if (isWicket) inn.wickets++;
+    // NOTE: inn.wickets is incremented AFTER fallOfWickets push (below in section 3)
+    // to keep the score string accurate (BUG 3 fix)
 
     // 2. Batsman Stats (Striker)
     let rotateStrike = (r % 2 !== 0) && (extraType !== "bonus" && extraType !== "penalty");
@@ -302,11 +306,13 @@ exports.updateScore = async (req, res) => {
 
         const bowlerWicket = isWicket && !["runOut", "retired-hurt", "retired-out", "timed-out"].includes(wicketType);
 
+        // BUG 3 FIX: push fallOfWickets BEFORE incrementing inn.wickets so score is correct
+        inn.wickets++;
         inn.fallOfWickets.push({
-          score: `${inn.runs}/${inn.wickets + 1}`,
+          score: `${inn.runs}/${inn.wickets}`,
           over: `${Math.floor(inn.balls / 6)}.${inn.balls % 6}`,
           player: dismissedPlayerName,
-          wicketNum: inn.wickets + 1
+          wicketNum: inn.wickets
         });
 
         // Milestone check on wicket (3W, 5W)
@@ -314,12 +320,12 @@ exports.updateScore = async (req, res) => {
         if (bwl) {
           const w = bwl.wickets + (bowlerWicket ? 1 : 0);
           if (w === 3 || w === 5) {
-             const mType = `${w}W`;
-             inn.milestones ||= [];
-             if (!inn.milestones.some(m => m.player === bwl.name && m.type === mType)) {
-                inn.milestones.push({ player: bwl.name, type: mType, over: `${Math.floor(inn.balls/6)}.${inn.balls%6}`, score: `${inn.runs}/${inn.wickets + 1}` });
-                inn.commentary.unshift({ over: "", text: `⭐ MILESTONE: ${bwl.name} has taken ${w} wickets!`, runs: 0, isWicket: false });
-             }
+            const mType = `${w}W`;
+            inn.milestones ||= [];
+            if (!inn.milestones.some(m => m.player === bwl.name && m.type === mType)) {
+              inn.milestones.push({ player: bwl.name, type: mType, over: `${Math.floor(inn.balls/6)}.${inn.balls%6}`, score: `${inn.runs}/${inn.wickets}` });
+              inn.commentary.unshift({ over: "", text: `⭐ MILESTONE: ${bwl.name} has taken ${w} wickets!`, runs: 0, isWicket: false });
+            }
           }
         }
       }
@@ -378,11 +384,22 @@ exports.updateScore = async (req, res) => {
       rotateStrike = !rotateStrike;
       inn.lastOverBowler = bowlerName;
 
-      // Calculate runs in this over for history
+      // BUG 7 FIX: capture over balls BEFORE prepending END OF OVER commentary
       const lastOverNum = Math.floor((inn.balls - 1) / 6);
-      const thisOverBalls = inn.commentary.slice(-10).filter(c => c.over && c.over.split('.')[0] === String(lastOverNum));
+      // Use the front of commentary (newest first) — ball entries for current over
+      // are at the top since we haven't prepended the summary yet
+      const thisOverBalls = inn.commentary.filter(c => c.over && c.over.split('.')[0] === String(lastOverNum));
       const runsInOver = thisOverBalls.reduce((acc, curr) => acc + (curr.runs || 0), 0);
       const wktsInOver = thisOverBalls.filter(c => c.isWicket).length;
+
+      // BUG 7 FIX: check maiden BEFORE unshifting END OF OVER entry
+      const bwl = inn.bowlers.find(b => b.name === bowlerName);
+      if (bwl) {
+        const extrasInOver = thisOverBalls.filter(c => c.extraType === "wide" || c.extraType === "noBall").length;
+        if (runsInOver === 0 && extrasInOver === 0) {
+          bwl.maidens++;
+        }
+      }
 
       inn.overHistory ||= [];
       inn.overHistory.push({
@@ -391,24 +408,13 @@ exports.updateScore = async (req, res) => {
         wickets: wktsInOver
       });
 
-      // Smart Commentary: Summary of the Over
+      // Smart Commentary: Summary of the Over (prepended AFTER maiden check)
       inn.commentary.unshift({
         over: `${lastOverNum + 1}.0`,
         text: `🔚 END OF OVER ${lastOverNum + 1}: ${runsInOver} runs | ${wktsInOver} wickets. Score: ${inn.runs}/${inn.wickets}`,
         runs: 0,
         isWicket: false
       });
-
-      // Maiden Check: Check last 6-8 entries in commentary for this over
-      const bwl = inn.bowlers.find(b => b.name === bowlerName);
-      if (bwl) {
-        const thisOverBalls = inn.commentary.slice(-10).filter(c => c.over && c.over.split('.')[0] === String(Math.floor((inn.balls-1)/6)));
-        const runsInOver = thisOverBalls.reduce((acc, curr) => acc + (curr.runs || 0), 0);
-        const extrasInOver = thisOverBalls.filter(c => c.extraType === "wide" || c.extraType === "noBall").length;
-        if (runsInOver === 0 && extrasInOver === 0) {
-          bwl.maidens++;
-        }
-      }
     }
 
     if (rotateStrike) {
@@ -475,6 +481,8 @@ exports.updateScore = async (req, res) => {
 
     if (recentBalls) match.recentBalls = recentBalls;
     if (bowlerName) match.currentBowler = bowlerName;
+    // BUG 6 FIX: always refresh currentBatsmen from live innings state
+    match.currentBatsmen = inn.batsmen.filter(b => !b.isOut).map(b => b.name);
     match.markModified(key); await match.save();
 
     if (match.status === "completed") {
@@ -563,16 +571,30 @@ exports.undoLastBall = async (req, res) => {
   try {
     const match = await Match.findById(req.params.id);
     if (!match) return res.status(404).json({ success: false, message: "Match not found" });
-    
-    let key = match.currentInnings === 1 ? "innings1" : "innings2";
+
+    // BUG 5 FIX: use correct innings key for Super Over
+    const buildKey = (innNum) => {
+      if (match.isSuperOver) return innNum === 1 ? "superOverInnings1" : "superOverInnings2";
+      return innNum === 1 ? "innings1" : "innings2";
+    };
+
+    let key = buildKey(match.currentInnings || 1);
     let inn = match[key];
-    
-    // If in innings 2 but no balls bowled, switch back to innings 1 to allow undoing the last ball of innings 1
-    if (match.currentInnings === 2 && (!inn || !inn.commentary || inn.commentary.length === 0)) {
+
+    // BUG 4 FIX: if innings 2 has no commentary, undo means we need to reverse the innings switch
+    if ((match.currentInnings === 2) && (!inn || !inn.commentary || inn.commentary.length === 0)) {
       match.currentInnings = 1;
       match.status = "live";
-      key = "innings1";
+      key = buildKey(1);
       inn = match[key];
+
+      // Reverse the auto-created innings 2 and target
+      if (!match.isSuperOver) {
+        match.innings2 = undefined;
+        match.target = 0;
+      } else {
+        match.superOverInnings2 = undefined;
+      }
     }
 
     if (!inn || !inn.commentary || inn.commentary.length === 0) {
@@ -699,6 +721,8 @@ exports.undoLastBall = async (req, res) => {
 
     match.status = "live";
     match.result = "";
+    // BUG 6 FIX: refresh currentBatsmen after undo
+    match.currentBatsmen = inn.batsmen.filter(b => !b.isOut).map(b => b.name);
 
     match.markModified(key); await match.save();
     emit(match._id, match);
@@ -857,11 +881,13 @@ const rebuildPointsTable = async (tournamentId) => {
 
       const inn1 = m.innings1;
       const inn2 = m.innings2;
+      // BUG 10 FIX: use correct max wickets for format (super over = 2, normal = 10)
+      const maxWicketsForNRR = m.isSuperOver ? 2 : 10;
       if (inn1 && inn1.balls > 0) {
         const batTeam = inn1.battingTeam === tA ? tA : tB;
         const bowlTeam = batTeam === tA ? tB : tA;
         let b = inn1.balls;
-        if (inn1.wickets >= 10) b = (m.overs || 20) * 6;
+        if (inn1.wickets >= maxWicketsForNRR) b = (m.overs || 20) * 6;
         table[batTeam].totalRuns += inn1.runs;
         table[batTeam].totalBalls += b;
         table[bowlTeam].totalRunsConceded += inn1.runs;
@@ -871,7 +897,7 @@ const rebuildPointsTable = async (tournamentId) => {
         const batTeam = inn2.battingTeam === tA ? tA : tB;
         const bowlTeam = batTeam === tA ? tB : tA;
         let b = inn2.balls;
-        if (inn2.wickets >= 10) b = (m.overs || 20) * 6;
+        if (inn2.wickets >= maxWicketsForNRR) b = (m.overs || 20) * 6;
         table[batTeam].totalRuns += inn2.runs;
         table[batTeam].totalBalls += b;
         table[bowlTeam].totalRunsConceded += inn2.runs;

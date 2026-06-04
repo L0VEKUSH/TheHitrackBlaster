@@ -129,6 +129,9 @@ const buildBowlerOptions = (player, currentWickets) => {
 
 exports.generateOverPoll = async (match) => {
   try {
+    // BUG 12 FIX: don't create polls for completed matches
+    if (!match || match.status === "completed") return;
+
     const innNum = match.currentInnings || 1;
     const key = match.isSuperOver
       ? (innNum === 1 ? "superOverInnings1" : "superOverInnings2")
