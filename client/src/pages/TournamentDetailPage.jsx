@@ -27,7 +27,14 @@ const BOWLING_CATEGORIES = [
   { key: "bestBowlingAverage", label: "Best Bowling Average",  icon: "🎖️", getValue: p => p.average ?? "—",        statLabel: "Avg",     extra: p => `${p.wickets} wkts` },
   { key: "bestBowling",        label: "Best Bowling",          icon: "🏹", getValue: p => `${p.bestFigures.wickets}/${p.bestFigures.runs}`, statLabel: "Figures", extra: p => `${p.wickets} total wkts` },
   { key: "mostFiveWickets",    label: "Most 5W Hauls",         icon: "🏆", getValue: p => p.fiveWickets,           statLabel: "5W",      extra: p => `${p.wickets} wkts` },
+  { key: "mostThreeWickets",  label: "Most 3W Hauls",         icon: "🥉", getValue: p => p.threeWickets,          statLabel: "3W",      extra: p => `${p.wickets} wkts` },
 ];
+
+
+function takeTop(list, n) {
+  return (Array.isArray(list) ? list : []).slice(0, n);
+}
+
 
 // ── Aggregate stats from match data ───────────────────────────────────────
 function computeTournamentLeaders(matches) {
@@ -112,8 +119,10 @@ function computeTournamentLeaders(matches) {
           runs: 0,
           balls: 0,
           fiveWickets: 0,
+          threeWickets: 0,
           bestFigures: { wickets: 0, runs: 999 },
         };
+
 
         const wickets = Number(p.wickets) || 0;
         const runs = Number(p.runs) || 0;
@@ -123,9 +132,11 @@ function computeTournamentLeaders(matches) {
         entry.runs += runs;
         entry.balls += balls;
         if (wickets >= 5) entry.fiveWickets += 1;
+        if (wickets >= 3) entry.threeWickets += 1;
         if (wickets > entry.bestFigures.wickets || (wickets === entry.bestFigures.wickets && runs < entry.bestFigures.runs)) {
           entry.bestFigures = { wickets, runs };
         }
+
 
         bowl[key] = entry;
       });
@@ -139,6 +150,19 @@ function computeTournamentLeaders(matches) {
     economy: p.balls > 0 ? parseFloat((p.runs / (p.balls / 6)).toFixed(2)) : null,
     average: p.wickets > 0 ? parseFloat((p.runs / p.wickets).toFixed(2)) : null,
   }));
+
+  // 5-wicket hauls
+  const mostFiveWickets = bowlers
+    .slice()
+    .filter((p) => (p.fiveWickets ?? 0) > 0)
+    .sort((a, b) => b.fiveWickets - a.fiveWickets || b.wickets - a.wickets);
+
+  // 3-wicket hauls (>= 3 wickets in an innings)
+  const mostThreeWickets = bowlers
+    .slice()
+    .filter((p) => (p.threeWickets ?? 0) > 0)
+    .sort((a, b) => b.threeWickets - a.threeWickets || b.wickets - a.wickets);
+
 
   return {
     mostRuns: batsmen.slice().sort((a, b) => b.runs - a.runs).slice(0, 10),
@@ -154,8 +178,11 @@ function computeTournamentLeaders(matches) {
     bestEconomy: bowlers.slice().filter((p) => p.balls >= 6).sort((a, b) => (a.economy ?? 999) - (b.economy ?? 999)).slice(0, 10),
     bestBowlingAverage: bowlers.slice().filter((p) => p.wickets > 0).sort((a, b) => a.average - b.average).slice(0, 10),
     bestBowling: bowlers.slice().sort((a, b) => b.bestFigures.wickets - a.bestFigures.wickets || a.bestFigures.runs - b.bestFigures.runs).slice(0, 10),
-    mostFiveWickets: bowlers.slice().sort((a, b) => b.fiveWickets - a.fiveWickets || b.wickets - a.wickets).slice(0, 10),
+    // Show ALL qualifying 5W/3W hauls (not limited to top 3)
+    mostFiveWickets: mostFiveWickets.slice(0, 10),
+    mostThreeWickets: mostThreeWickets.slice(0, 10),
   };
+
 }
 
 // ── Main Component ────────────────────────────────────────────────────────

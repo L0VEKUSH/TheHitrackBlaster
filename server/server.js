@@ -197,6 +197,48 @@ app.use(express.urlencoded({ extended: false, limit: "5mb" }));
 app.use(validatePayloadSize);
 app.use(sanitizeInput);
 
+// Middleware to prefix relative /uploads/ paths with the server's absolute host URL
+app.use((req, res, next) => {
+  const originalJson = res.json;
+  res.json = function (body) {
+    const host = `${req.protocol}://${req.get("host")}`;
+    const prefixUploads = (obj) => {
+      if (!obj) return obj;
+      if (typeof obj === "string") {
+        if (obj.startsWith("/uploads/")) {
+          return `${host}${obj}`;
+        }
+        return obj;
+      }
+      if (Array.isArray(obj)) {
+        return obj.map(prefixUploads);
+      }
+      if (typeof obj === "object") {
+        if (typeof obj.toJSON === "function") {
+          return prefixUploads(obj.toJSON());
+        }
+        if (Object.prototype.toString.call(obj) === "[object Object]") {
+          const newObj = {};
+          for (const key in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, key)) {
+              newObj[key] = prefixUploads(obj[key]);
+            }
+          }
+          return newObj;
+        }
+      }
+      return obj;
+    };
+    try {
+      const processedBody = prefixUploads(body);
+      return originalJson.call(this, processedBody);
+    } catch (err) {
+      return originalJson.call(this, body);
+    }
+  };
+  next();
+});
+
 // Block API requests when DB is not connected
 // Block API requests when DB is not connected, but allow preflight OPTIONS through
 app.use((req, res, next) => {

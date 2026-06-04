@@ -4,6 +4,7 @@ import { useParams, Link } from "react-router-dom";
 import { playerAPI, teamAPI } from "../services/api";
 import Spinner from "../components/common/Spinner";
 import dayjs from "dayjs";
+import { getImageUrl } from "../utils/imageUtils";
 
 export default function PlayerDetailPage() {
   const { id } = useParams();
@@ -87,8 +88,15 @@ export default function PlayerDetailPage() {
         <div className="flex flex-col md:flex-row gap-8 items-center md:items-start">
           <div className="relative group">
             {player.photo
-              ? <img src={player.photo} alt={player.name}
-                  className="w-32 h-32 md:w-40 md:h-40 rounded-2xl object-cover border-2 border-brand-500/30 shadow-2xl transition-transform group-hover:scale-105" />
+              ? <img
+                  src={getImageUrl(player.photo)}
+                  alt={player.name}
+                  onError={(e) => {
+                    e.currentTarget.onerror = null;
+                    e.currentTarget.src = getImageUrl(null);
+                  }}
+                  className="w-32 h-32 md:w-40 md:h-40 rounded-2xl object-cover border-2 border-brand-500/30 shadow-2xl transition-transform group-hover:scale-105"
+                />
               : <div className="w-32 h-32 md:w-40 md:h-40 rounded-2xl bg-brand-900/50 flex items-center justify-center text-6xl shadow-2xl">🧑</div>
             }
             {player.isCaptain && (

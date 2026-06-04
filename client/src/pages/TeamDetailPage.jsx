@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { teamAPI } from "../services/api";
 import Spinner from "../components/common/Spinner";
+import { getImageUrl } from "../utils/imageUtils";
 
 export default function TeamDetailPage() {
   const { id } = useParams();
@@ -23,7 +24,15 @@ export default function TeamDetailPage() {
       <div className="card p-6 mb-6">
         <div className="flex items-center gap-5">
           {team.flag || team.logo
-            ? <img src={team.flag || team.logo} alt={team.name} className="w-20 h-14 object-contain shrink-0"/>
+            ? <img
+                src={getImageUrl(team.flag || team.logo)}
+                alt={team.name}
+                onError={(e) => {
+                  e.currentTarget.onerror = null;
+                  e.currentTarget.src = getImageUrl(null);
+                }}
+                className="w-20 h-14 object-contain shrink-0"
+              />
             : <div className="text-5xl shrink-0">🏳️</div>
           }
           <div>
@@ -89,9 +98,17 @@ export default function TeamDetailPage() {
             {team.players.map(p => (
               <Link key={p._id} to={`/players/${p._id}`}
                 className="flex items-center gap-3 bg-gray-800 rounded-lg p-3 hover:bg-gray-700 transition-colors"
-              >
-                {p.photo
-                  ? <img src={p.photo} alt={p.name} className="w-10 h-10 rounded-full object-cover shrink-0"/>
+                >
+                  {p.photo
+                  ? <img
+                      src={getImageUrl(p.photo)}
+                      alt={p.name}
+                      onError={(e) => {
+                        e.currentTarget.onerror = null;
+                        e.currentTarget.src = getImageUrl(null);
+                      }}
+                      className="w-10 h-10 rounded-full object-cover shrink-0"
+                    />
                   : <div className="w-10 h-10 rounded-full bg-brand-800 flex items-center justify-center text-lg shrink-0">🧑</div>
                 }
                 <div>
