@@ -271,12 +271,23 @@ exports.updateScore = async (req, res) => {
 
         // Milestone check (50, 100)
         if (bat.runs === 50 || bat.runs === 100) {
-           const mType = String(bat.runs);
-           inn.milestones ||= [];
-           if (!inn.milestones.some(m => m.player === bat.name && m.type === mType)) {
-              inn.milestones.push({ player: bat.name, type: mType, over: currentBallOverStr, score: `${inn.runs}/${inn.wickets}` });
-              inn.commentary.unshift({ over: "", text: `🏏 MILESTONE: ${bat.name} reaches ${bat.runs}!`, runs: 0, isWicket: false });
-           }
+          // Normalize legacy/corrupted milestone values (some docs may have strings or malformed items)
+          if (!Array.isArray(inn.milestones)) inn.milestones = [];
+          inn.milestones = inn.milestones.filter(m => m && typeof m === "object");
+
+          const mType = String(bat.runs);
+          const milestoneKey = `${bat.name}|${mType}`;
+
+          if (!inn.milestones.some(m => `${m.player}|${m.type}` === milestoneKey)) {
+            inn.milestones.push({
+              player: bat.name,
+              type: mType,
+              over: currentBallOverStr,
+              score: `${inn.runs}/${inn.wickets}`,
+              createdAt: new Date()
+            });
+            inn.commentary.unshift({ over: "", text: `🏏 MILESTONE: ${bat.name} reaches ${bat.runs}!`, runs: 0, isWicket: false });
+          }
         }
       }
     }
@@ -321,10 +332,21 @@ exports.updateScore = async (req, res) => {
         if (bwl) {
           const w = bwl.wickets + (bowlerWicket ? 1 : 0);
           if (w === 3 || w === 5) {
+            // Normalize legacy/corrupted milestone values (some docs may have strings or malformed items)
+            if (!Array.isArray(inn.milestones)) inn.milestones = [];
+            inn.milestones = inn.milestones.filter(m => m && typeof m === "object");
+
             const mType = `${w}W`;
-            inn.milestones ||= [];
-            if (!inn.milestones.some(m => m.player === bwl.name && m.type === mType)) {
-              inn.milestones.push({ player: bwl.name, type: mType, over: currentBallOverStr, score: `${inn.runs}/${inn.wickets}` });
+            const milestoneKey = `${bwl.name}|${mType}`;
+
+            if (!inn.milestones.some(m => `${m.player}|${m.type}` === milestoneKey)) {
+              inn.milestones.push({
+                player: bwl.name,
+                type: mType,
+                over: currentBallOverStr,
+                score: `${inn.runs}/${inn.wickets}`,
+                createdAt: new Date()
+              });
               inn.commentary.unshift({ over: "", text: `⭐ MILESTONE: ${bwl.name} has taken ${w} wickets!`, runs: 0, isWicket: false });
             }
           }
