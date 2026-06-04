@@ -147,7 +147,7 @@ exports.setToss = async (req, res) => {
     match.tossWinner = winner;
     match.tossDecision = decision;
     const battingFirst = decision === "bat" ? winner : (winner === match.teamA ? match.teamB : match.teamA);
-    match.innings1 = { battingTeam: battingFirst, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [] };
+    match.innings1 = { battingTeam: battingFirst, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [], overHistory: [], milestones: [] };
     match.status = "live";
     await match.save();
     emit(match._id, match);
@@ -267,6 +267,7 @@ exports.updateScore = async (req, res) => {
         // Milestone check (50, 100)
         if (bat.runs === 50 || bat.runs === 100) {
            const mType = String(bat.runs);
+           inn.milestones ||= [];
            if (!inn.milestones.some(m => m.player === bat.name && m.type === mType)) {
               inn.milestones.push({ player: bat.name, type: mType, over: `${Math.floor(inn.balls/6)}.${inn.balls%6}`, score: `${inn.runs}/${inn.wickets}` });
               inn.commentary.unshift({ over: "", text: `🏏 MILESTONE: ${bat.name} reaches ${bat.runs}!`, runs: 0, isWicket: false });
@@ -314,6 +315,7 @@ exports.updateScore = async (req, res) => {
           const w = bwl.wickets + (bowlerWicket ? 1 : 0);
           if (w === 3 || w === 5) {
              const mType = `${w}W`;
+             inn.milestones ||= [];
              if (!inn.milestones.some(m => m.player === bwl.name && m.type === mType)) {
                 inn.milestones.push({ player: bwl.name, type: mType, over: `${Math.floor(inn.balls/6)}.${inn.balls%6}`, score: `${inn.runs}/${inn.wickets + 1}` });
                 inn.commentary.unshift({ over: "", text: `⭐ MILESTONE: ${bwl.name} has taken ${w} wickets!`, runs: 0, isWicket: false });
@@ -382,6 +384,7 @@ exports.updateScore = async (req, res) => {
       const runsInOver = thisOverBalls.reduce((acc, curr) => acc + (curr.runs || 0), 0);
       const wktsInOver = thisOverBalls.filter(c => c.isWicket).length;
 
+      inn.overHistory ||= [];
       inn.overHistory.push({
         over: lastOverNum + 1,
         runs: runsInOver,
@@ -439,12 +442,12 @@ exports.updateScore = async (req, res) => {
           match.currentInnings = 2;
           match.target = inn.runs + 1;
           const bowlingTeam = match.innings1.battingTeam === match.teamA ? match.teamB : match.teamA;
-          match.innings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [] };
+          match.innings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [], overHistory: [], milestones: [] };
         } else {
           // Super Over 1st Innings done
           match.currentInnings = 2;
           const bowlingTeam = match.superOverInnings1.battingTeam === match.teamA ? match.teamB : match.teamA;
-          match.superOverInnings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [] };
+          match.superOverInnings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [], overHistory: [], milestones: [] };
         }
       } else {
         // Match or Super Over Finished
@@ -739,10 +742,10 @@ exports.declareInnings = async (req, res) => {
       if (!match.isSuperOver) {
         match.target = inn.runs + 1;
         const bowlingTeam = match.innings1.battingTeam === match.teamA ? match.teamB : match.teamA;
-        match.innings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [] };
+        match.innings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [], overHistory: [], milestones: [] };
       } else {
         const bowlingTeam = match.superOverInnings1.battingTeam === match.teamA ? match.teamB : match.teamA;
-        match.superOverInnings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [] };
+        match.superOverInnings2 = { battingTeam: bowlingTeam, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [], overHistory: [], milestones: [] };
       }
     } else {
       match.status = "completed";
@@ -1130,8 +1133,8 @@ exports.startSuperOver = async (req, res) => {
     const team1 = match.innings2.battingTeam;
     const team2 = match.innings1.battingTeam;
 
-    match.superOverInnings1 = { battingTeam: team1, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [] };
-    match.superOverInnings2 = { battingTeam: team2, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [] };
+    match.superOverInnings1 = { battingTeam: team1, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [], overHistory: [], milestones: [] };
+    match.superOverInnings2 = { battingTeam: team2, runs: 0, wickets: 0, balls: 0, extras: 0, batsmen: [], bowlers: [], commentary: [], fallOfWickets: [], partnerships: [], overHistory: [], milestones: [] };
 
     await match.save();
     emit(match._id, match);
