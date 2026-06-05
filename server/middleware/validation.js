@@ -67,8 +67,15 @@ exports.validateScoreUpdate = (req, res, next) => {
 
   // runs must be a finite number (frontend passes number-like values)
   const normalizedRuns = typeof runs === "number" ? runs : Number(runs);
-  if (!Number.isFinite(normalizedRuns) || normalizedRuns < 0 || normalizedRuns > 6) {
-    return res.status(400).json({ success: false, message: "runs must be a number between 0 and 6" });
+  if (!Number.isFinite(normalizedRuns) || normalizedRuns < 0) {
+    return res.status(400).json({ success: false, message: "runs must be a non-negative number" });
+  }
+  // Standard deliveries capped at 6. Extras (wides/no-balls with overthrows) and
+  // bonus/penalty adjustments can legally exceed 6, so only cap for normal balls.
+  const isExtraDelivery = extraType === "wide" || extraType === "noBall" ||
+    extraType === "no-ball" || extraType === "bonus" || extraType === "penalty";
+  if (!isExtraDelivery && normalizedRuns > 6) {
+    return res.status(400).json({ success: false, message: "runs must be between 0 and 6 for a normal delivery" });
   }
   req.body.runs = normalizedRuns;
 
@@ -99,8 +106,10 @@ exports.validateScoreUpdate = (req, res, next) => {
     if (!wicketType) {
       return res.status(400).json({ success: false, message: "wicketType required for wicket" });
     }
-    if (!bowlerName) {
-      return res.status(400).json({ success: false, message: "bowlerName required for wicket" });
+    // bowlerName is optional for run-outs, retired hurt/out — fielder takes the wicket
+    const bowlerlessWickets = ["runOut", "retired-hurt", "retired-out", "obstructing-field"];
+    if (!bowlerName && !bowlerlessWickets.includes(wicketType)) {
+      return res.status(400).json({ success: false, message: "bowlerName required for this wicket type" });
     }
     const dismissed = outPlayerName || batterName;
     if (!dismissed) {
@@ -108,8 +117,8 @@ exports.validateScoreUpdate = (req, res, next) => {
     }
   }
 
-  // For non-wicket balls, require striker/bowler names when provided by frontend
-  if (!bowlerName) {
+  // bowlerName required for non-wicket, non-runout deliveries
+  if (!bowlerName && !isWicket) {
     return res.status(400).json({ success: false, message: "bowlerName is required" });
   }
   if (!batterName && !isWicket) {

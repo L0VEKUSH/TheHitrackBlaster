@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { playerAPI } from "../services/api";
 import Spinner from "../components/common/Spinner";
 import { EmptyState, PageHeader } from "../components/common/Spinner";
+import { getImageUrl } from "../utils/imageUtils";
 
 const ROLES = ["All","Batsman","Bowler","All-Rounder","Wicket-Keeper"];
 
@@ -54,8 +55,15 @@ export default function PlayersPage() {
                   className="card p-4 hover:border-brand-600 transition-colors flex flex-col items-center text-center"
                 >
                   {p.photo
-                    ? <img src={p.photo} alt={p.name}
-                        className="w-16 h-16 rounded-full object-cover mb-3 border-2 border-gray-700"/>
+                    ? <img
+                        src={getImageUrl(p.photo)}
+                        alt={p.name}
+                        onError={(e) => {
+                          e.currentTarget.onerror = null;
+                          e.currentTarget.src = getImageUrl(null);
+                        }}
+                        className="w-16 h-16 rounded-full object-cover mb-3 border-2 border-gray-700"
+                      />
                     : <div className="w-16 h-16 rounded-full bg-brand-800 flex items-center justify-center mb-3 text-2xl">🧑</div>
                   }
                   <h3 className="text-white font-bold text-sm">

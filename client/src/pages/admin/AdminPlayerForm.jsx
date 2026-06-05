@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import api, { playerAPI, teamAPI } from "../../services/api";
 import dayjs from "dayjs";
 import { FiImage } from "react-icons/fi";
+import { getImageUrl } from "../../utils/imageUtils";
 
 const ROLES = ["Batsman","Bowler","All-Rounder","Wicket-Keeper"];
 
@@ -64,7 +65,7 @@ export default function AdminPlayerForm() {
     }
   }, [id]);
 
-  const handleImageUpload = async (e) => {
+const handleImageUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
@@ -78,7 +79,16 @@ export default function AdminPlayerForm() {
           "Content-Type": "multipart/form-data"
         }
       });
-      if (data.success) set("photo", data.imageUrl);
+      if (data.success) {
+        // Persist whatever backend returned; normalize only at render-time
+        set("photo", data.imageUrl);
+        if (import.meta.env?.VITE_DEBUG_IMAGES === "true") {
+          // eslint-disable-next-line no-console
+          console.debug("[images] upload response imageUrl:", data.imageUrl);
+          // eslint-disable-next-line no-console
+          console.debug("[images] normalized imageUrl:", getImageUrl(data.imageUrl));
+        }
+      }
     } catch (err) {
       alert("Upload failed");
     } finally {
@@ -163,7 +173,15 @@ export default function AdminPlayerForm() {
                   </div>
                   {form.photo && (
                     <div className="w-16 h-16 rounded-lg overflow-hidden border border-gray-800">
-                      <img src={form.photo} alt="P" className="w-full h-full object-cover" />
+                      <img
+                        src={getImageUrl(form.photo)}
+                        alt="P"
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          e.currentTarget.onerror = null;
+                          e.currentTarget.src = getImageUrl(null);
+                        }}
+                      />
                     </div>
                   )}
                 </div>

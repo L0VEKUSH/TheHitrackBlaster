@@ -507,13 +507,17 @@ export default function AdminLiveScoring() {
                         .concat(match.innings1?.bowlers || []).concat(match.innings2?.bowlers || [])
                         .concat(rosterA || []).concat(rosterB || [])
                         .filter(Boolean).map(p => [p.name, p])
-                      ).values()].map(p => (
-                        <option key={p.name} value={p.name}>{p.name}</option>
-                      ))}
+                      ).values()].map(p => {
+                        const pts = statPlayers.find(sp => sp.name === p.name)?.points || 0;
+                        return (
+                          <option key={p.name} value={p.name}>{p.name} ({pts} pts)</option>
+                        );
+                      })}
                     </select>
                     <button className="btn-primary px-4 py-2 rounded-xl text-xs shrink-0" onClick={async () => {
                       if (!selectedMoM) return flash('Select player first');
-                      await saveMoM(selectedMoM, undefined);
+                      const pts = statPlayers.find(sp => sp.name === selectedMoM)?.points;
+                      await saveMoM(selectedMoM, pts);
                     }}>Set</button>
                   </div>
                 </details>

@@ -107,6 +107,7 @@ const buildBatsmanOptions = (player, currentRuns) => {
   ];
 };
 
+
 const buildBowlerOptions = (player, currentWickets) => {
   const average = player?.bowling?.average || 35;
   const wicketsSoFar = currentWickets || 0;
@@ -128,6 +129,9 @@ const buildBowlerOptions = (player, currentWickets) => {
 
 exports.generateOverPoll = async (match) => {
   try {
+    // BUG 12 FIX: don't create polls for completed matches
+    if (!match || match.status === "completed") return;
+
     const innNum = match.currentInnings || 1;
     const key = match.isSuperOver
       ? (innNum === 1 ? "superOverInnings1" : "superOverInnings2")
@@ -142,21 +146,57 @@ exports.generateOverPoll = async (match) => {
     const bowlerName = match.currentBowler;
     const bowlerStats = inn.bowlers.find(b => b.name === bowlerName);
     const activePlayers = getActiveContestants(inn, bowlerName, bowlerStats);
-    const mainPlayer = activePlayers.slice().sort((a, b) => b.points - a.points || b.stats.runs - a.stats.runs || b.stats.wickets - a.stats.wickets)[0];
+
+    const sorted = activePlayers
+      .slice()
+      .sort((a, b) => b.points - a.points || b.stats.runs - a.stats.runs || b.stats.wickets - a.stats.wickets);
+
+    const mainPlayer = sorted[0];
+    const secondPlayer = sorted[1];
+
+    // If main question/options are repeating, switch to 2nd main player.
+    // We only look at the latest active auto poll for this match.
+    const lastAutoPoll = await Poll.findOne({ matchId: match._id, type: "auto" })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const mainCandidateQuestion = mainPlayer
+      ? (mainPlayer.role === "batsman"
+          ? `${mainPlayer.name} will score how many more runs this innings?`
+          : `${mainPlayer.name} will take how many wickets?`)
+      : `Which outcome will happen next?`;
+
+    const mainCandidateOptions = mainPlayer
+      ? (mainPlayer.role === "batsman"
+          ? [{ text: "0-29" }, { text: "30-49" }, { text: "50+" }]
+          : [{ text: "0" }, { text: "1" }, { text: "2+" }])
+      : [{ text: "Strong finish" }, { text: "Middle order drift" }, { text: "Late collapse" }];
+
+    const lastQuestion = lastAutoPoll?.question;
+    const lastOptionsText = (lastAutoPoll?.options || []).map(o => o.text);
+    const mainOptionsText = mainCandidateOptions.map(o => o.text);
+
+    const isRepeating =
+      !!lastAutoPoll &&
+      lastQuestion === mainCandidateQuestion &&
+      lastOptionsText.length === mainOptionsText.length &&
+      lastOptionsText.every((t, i) => t === mainOptionsText[i]);
+
+    const playerToUse = isRepeating && secondPlayer ? secondPlayer : mainPlayer;
 
     let question = "";
     let options = [];
 
-    if (mainPlayer) {
-      if (mainPlayer.role === "batsman") {
-        question = `${mainPlayer.name} will score how many more runs this innings?`;
+    if (playerToUse) {
+      if (playerToUse.role === "batsman") {
+        question = `${playerToUse.name} will score how many more runs this innings?`;
         options = [
           { text: "0-29" },
           { text: "30-49" },
           { text: "50+" }
         ];
       } else {
-        question = `${mainPlayer.name} will take how many wickets?`;
+        question = `${playerToUse.name} will take how many wickets?`;
         options = [
           { text: "0" },
           { text: "1" },
@@ -171,6 +211,7 @@ exports.generateOverPoll = async (match) => {
         { text: "Late collapse" }
       ];
     }
+
 
     await Poll.updateMany({ matchId: match._id, isActive: true }, { isActive: false });
 
