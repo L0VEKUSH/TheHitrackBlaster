@@ -338,13 +338,23 @@ exports.updateScore = async (req, res) => {
 
         // Milestone check (50, 100)
         if (bat.runs === 50 || bat.runs === 100) {
-          // Normalize legacy/corrupted milestone values (some docs may have strings or malformed items)
+          // Normalize milestones: ensure each milestone has the schema types.
           if (!Array.isArray(inn.milestones)) inn.milestones = [];
-            inn.milestones = inn.milestones.filter(m => m && typeof m === "object");
 
-            const mType = String(bat.runs);
+          inn.milestones = inn.milestones
+            .filter(m => m && typeof m === "object")
+            .map(m => ({
+              player: m.player != null ? String(m.player) : "Unknown",
+              type: m.type != null ? String(m.type) : "Achievement",
+              over: m.over != null ? String(m.over) : "",
+              score: m.score != null ? String(m.score) : "",
+              createdAt: m.createdAt ? new Date(m.createdAt) : new Date()
+            }));
 
-            const milestoneKey = `${bat.name}|${mType}`;
+          const mType = String(bat.runs);
+
+          const milestoneKey = `${bat.name}|${mType}`;
+
 
 
           if (!inn.milestones.some(m => `${m.player}|${m.type}` === milestoneKey)) {
