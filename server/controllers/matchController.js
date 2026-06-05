@@ -118,6 +118,7 @@ exports.deleteMatch = async (req, res) => {
     if (match.tournament) {
       try {
         await Tournament.findByIdAndUpdate(match.tournament, { $pull: { matches: match._id } });
+        // Rebuild points table (definition appears later in the file)
         await rebuildPointsTable(match.tournament);
       } catch (e) {
         console.error("Failed to update tournament after match deletion", e);
@@ -136,6 +137,7 @@ exports.deleteMatch = async (req, res) => {
     res.json({ success: true, message: "Match deleted and points table updated" });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
+
 
 /* ── ADMIN TOSS ─────────────────────────────────────── */
 
@@ -951,11 +953,13 @@ const inferResultState = (match) => {
   return { winner: null, isTie: false, isNR: true };
 };
 
-const rebuildPointsTable = async (tournamentId) => {
+function rebuildPointsTable(tournamentId) {
   if (!tournamentId) return;
-  try {
-    const tourney = await Tournament.findById(tournamentId).populate("matches");
-    if (!tourney || !tourney.teams) return;
+  return (async () => {
+    try {
+      const tourney = await Tournament.findById(tournamentId).populate("matches");
+      if (!tourney || !tourney.teams) return;
+
 
     const table = {};
     tourney.teams.forEach(t => {
