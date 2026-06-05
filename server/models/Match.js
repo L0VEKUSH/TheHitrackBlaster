@@ -55,7 +55,8 @@ const inningsSchema = new mongoose.Schema({
   overHistory: [{
     over: Number,
     runs: Number,
-    wickets: Number
+    wickets: Number,
+    extras: { type: Number, default: 0 }
   }],
   milestones: [{
     player: { type: String, required: true },

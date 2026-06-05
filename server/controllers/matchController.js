@@ -157,6 +157,67 @@ exports.setToss = async (req, res) => {
 
 /* ── ADMIN LIVE SCORE UPDATE (CRICKET RULES ENGINE) ─── */
 
+const normalizeMilestones = (inn) => {
+  // Migration safety: old docs may have milestones as strings (or mixed arrays).
+  // New schema expects array of objects: { player, type, over, score, createdAt }
+  if (!inn || !("milestones" in inn)) return;
+
+  if (!Array.isArray(inn.milestones)) {
+    inn.milestones = [];
+    return;
+  }
+
+  const now = new Date();
+  const toMilestoneObj = (item) => {
+    if (!item) return null;
+
+    if (typeof item === "object") {
+      const player = item.player != null ? String(item.player) : "Unknown";
+      const type = item.type != null ? String(item.type) : "Achievement";
+      const over = item.over != null ? String(item.over) : "";
+      const score = item.score != null ? String(item.score) : "";
+      return {
+        player,
+        type,
+        over,
+        score,
+        createdAt: item.createdAt ? new Date(item.createdAt) : now
+      };
+    }
+
+    if (typeof item === "string") {
+      // Best-effort parsing for common legacy strings.
+      const s = item;
+
+      let type = "Achievement";
+      if (s.includes("3W")) type = "3W";
+      else if (s.includes("5W")) type = "5W";
+      else if (/\bFifty\b/i.test(s) || /\b50\b/.test(s)) type = "50";
+      else if (/\bCentury\b/i.test(s) || /\b100\b/.test(s)) type = "100";
+      else if (/\bHat-?trick\b/i.test(s)) type = "Hat-trick";
+
+      // Try to extract a name between keywords like "Player" or before "reaches/takes".
+      let player = "Unknown";
+      const m1 = s.match(/Player\s+reached\s+\w+\s+([A-Za-z][A-Za-z\s.'-]*)/i);
+      const m2 = s.match(/^\s*([A-Za-z][A-Za-z\s.'-]*)\s+/);
+      if (m1 && m1[1]) player = m1[1].trim();
+      else if (m2 && m2[1]) player = m2[1].trim();
+
+      return {
+        player,
+        type,
+        over: "",
+        score: "",
+        createdAt: now
+      };
+    }
+
+    return null;
+  };
+
+  inn.milestones = inn.milestones.map(toMilestoneObj).filter(Boolean);
+};
+
 exports.updateScore = async (req, res) => {
   try {
     const match = await Match.findById(req.params.id);
@@ -177,6 +238,12 @@ exports.updateScore = async (req, res) => {
       : (inningsNum === 1 ? "innings1" : "innings2");
     const inn = match[key];
     if (!inn) return res.status(400).json({ success: false, message: "Innings not initialized" });
+
+    // Ensure milestones is always a subdocument array of objects
+    normalizeMilestones(inn);
+
+    if (!Array.isArray(inn.milestones)) inn.milestones = [];
+
 
     const isWide = extraType === "wide";
     const isNoBall = extraType === "noBall";
@@ -273,19 +340,24 @@ exports.updateScore = async (req, res) => {
         if (bat.runs === 50 || bat.runs === 100) {
           // Normalize legacy/corrupted milestone values (some docs may have strings or malformed items)
           if (!Array.isArray(inn.milestones)) inn.milestones = [];
-          inn.milestones = inn.milestones.filter(m => m && typeof m === "object");
+            inn.milestones = inn.milestones.filter(m => m && typeof m === "object");
 
-          const mType = String(bat.runs);
-          const milestoneKey = `${bat.name}|${mType}`;
+            const mType = String(bat.runs);
+
+            const milestoneKey = `${bat.name}|${mType}`;
+
 
           if (!inn.milestones.some(m => `${m.player}|${m.type}` === milestoneKey)) {
-            inn.milestones.push({
+            const milestone = {
               player: bat.name,
               type: mType,
               over: currentBallOverStr,
               score: `${inn.runs}/${inn.wickets}`,
               createdAt: new Date()
-            });
+            };
+            console.log("Creating milestone:", milestone);
+            inn.milestones.push(milestone);
+
             inn.commentary.unshift({ over: "", text: `🏏 MILESTONE: ${bat.name} reaches ${bat.runs}!`, runs: 0, isWicket: false });
           }
         }
@@ -436,7 +508,8 @@ exports.updateScore = async (req, res) => {
       inn.overHistory.push({
         over: lastOverNum + 1,
         runs: runsInOver,
-        wickets: wktsInOver
+        wickets: wktsInOver,
+        extras: extrasInOver
       });
 
       // Smart Commentary: Summary of the Over (prepended AFTER maiden check)
@@ -676,15 +749,13 @@ exports.undoLastBall = async (req, res) => {
         const bowlerWicket = isWicket && !["runOut", "retired-hurt", "retired-out", "timed-out"].includes(wType);
         if (bowlerWicket) bwl.wickets = Math.max(0, bwl.wickets - 1);
 
-        // Reverse Maiden: if we are undoing the 6th ball (isOverCompleteBeforeUndo), 
-        // we check if the over WAS a maiden.
+        // Reverse Maiden deterministically using the last saved overHistory entry.
+        // This avoids relying on fragile commentary slicing / over string parsing.
         if (isLegal && (inn.balls + 1) % 6 === 0) {
-           const thisOverBalls = [lastAction, ...inn.commentary.slice(0, 7)].filter(c => c.over.split('.')[0] === String(Math.floor(inn.balls/6)));
-           const runsInOver = thisOverBalls.reduce((acc, curr) => acc + (curr.runs || 0), 0);
-           const extrasInOver = thisOverBalls.filter(c => c.extraType === "wide" || c.extraType === "noBall").length;
-           if (runsInOver === 0 && extrasInOver === 0) {
-             bwl.maidens = Math.max(0, bwl.maidens - 1);
-           }
+          const lastOver = Array.isArray(inn.overHistory) && inn.overHistory.length > 0 ? inn.overHistory[inn.overHistory.length - 1] : null;
+          if (lastOver && lastOver.runs === 0 && lastOver.extras === 0) {
+            bwl.maidens = Math.max(0, bwl.maidens - 1);
+          }
         }
       }
     }

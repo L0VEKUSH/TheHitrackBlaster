@@ -284,7 +284,7 @@ export default function TournamentDetailPage() {
       </div>
 
       {/* ── Tab Body ───────────────────────────────────── */}
-      <div className="card overflow-hidden">
+      <div className="card">
         <div className="px-2 border-b border-gray-800">
           <TabBar
             tabs={[
@@ -328,10 +328,10 @@ export default function TournamentDetailPage() {
 
           {/* ═══ POINTS TABLE ═══════════════════════════ */}
           {tab === "points" && (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto -mx-4 px-4 sm:mx-0 sm:px-0">
               {tournament.pointsTable?.length > 0 ? (
-                <table className="w-full text-sm">
-                  <thead>
+                <table className="min-w-[520px] w-full text-sm">
+                    <thead>
                     <tr className="border-b border-gray-800 text-gray-400 text-xs uppercase">
                       {["#","Team","P","W","L","T","NR","Pts","NRR"].map(h => (
                         <th key={h} className="py-2 px-3 text-center font-semibold first:text-left">{h}</th>
