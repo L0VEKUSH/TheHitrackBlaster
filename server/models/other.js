@@ -60,7 +60,7 @@ const News = mongoose.model("News", newsSchema);
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true, lowercase: true },
-  password: { type: String, required: true, minlength: 6 },
+  password: { type: String, required: true, minlength: 8 },
   avatar: { type: String, default: "" },
   favoriteTeam: { type: String, default: "" },
   isActive: { type: Boolean, default: true },
@@ -81,9 +81,10 @@ const User = mongoose.model("User", userSchema);
 const adminSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true, lowercase: true },
-  password: { type: String, required: true },
+  password: { type: String, required: true, minlength: 12 },
   role: { type: String, enum: ["superadmin", "editor"], default: "editor" },
-  isActive: { type: Boolean, default: true }
+  isActive: { type: Boolean, default: true },
+  bootstrapKey: { type: String, unique: true, sparse: true, select: false }
 }, { timestamps: true });
 
 adminSchema.pre("save", async function (next) {

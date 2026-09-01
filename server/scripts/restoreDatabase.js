@@ -1,5 +1,6 @@
-require("dotenv/config");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+require("dotenv").config({ path: path.join(__dirname, "..", "..", ".env"), override: false });
 const { spawnSync } = require("child_process");
 
 const args = process.argv.slice(2);

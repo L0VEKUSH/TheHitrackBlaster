@@ -1,5 +1,8 @@
 // server/controllers/managementController.js
 const { Management } = require("../models/other");
+const { pick } = require("../utils/input");
+
+const WRITABLE_FIELDS = ["name", "role", "image", "bio", "socialLinks", "displayOrder"];
 
 exports.getManagementTeam = async (req, res) => {
   try {
@@ -22,7 +25,7 @@ exports.getManagementMember = async (req, res) => {
 
 exports.createManagementMember = async (req, res) => {
   try {
-    const member = await Management.create(req.body);
+    const member = await Management.create(pick(req.body, WRITABLE_FIELDS));
     res.status(201).json({ success: true, data: member });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -31,7 +34,11 @@ exports.createManagementMember = async (req, res) => {
 
 exports.updateManagementMember = async (req, res) => {
   try {
-    const member = await Management.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const member = await Management.findByIdAndUpdate(
+      req.params.id,
+      pick(req.body, WRITABLE_FIELDS),
+      { new: true, runValidators: true, context: "query" },
+    );
     if (!member) return res.status(404).json({ success: false, message: "Member not found" });
     res.json({ success: true, data: member });
   } catch (err) {

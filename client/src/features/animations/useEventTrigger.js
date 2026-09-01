@@ -1,10 +1,16 @@
 import { useEffect, useRef } from "react";
 import { soundManager } from "../audio/soundManager";
 import { useHype } from "../core/HypeContext";
+import { getActiveInnings } from "../../utils/matchSelectors";
 
 export const useEventTrigger = (match, onEvent) => {
   const { isHypeMode } = useHype();
   const prevMatchRef = useRef(null);
+  const onEventRef = useRef(onEvent);
+
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
 
   useEffect(() => {
     if (!match || !prevMatchRef.current) {
@@ -13,16 +19,35 @@ export const useEventTrigger = (match, onEvent) => {
     }
 
     const prevMatch = prevMatchRef.current;
-    const currentInn = match.currentInnings === 2 ? match.innings2 : match.innings1;
-    const prevInn = prevMatch.currentInnings === 2 ? prevMatch.innings2 : prevMatch.innings1;
+    // Store the snapshot before any early return so an innings transition does
+    // not get compared repeatedly on every render.
+    prevMatchRef.current = match;
+
+    const currentMatchId = match._id ?? match.id;
+    const previousMatchId = prevMatch._id ?? prevMatch.id;
+    if (currentMatchId != null && previousMatchId != null &&
+        String(currentMatchId) !== String(previousMatchId)) {
+      return;
+    }
+
+    const currentInn = getActiveInnings(match);
+    const prevInn = getActiveInnings(prevMatch);
 
     if (!currentInn || !prevInn) return;
 
-    // Detect Six
-    const currentComm = currentInn.commentary?.[0];
-    const prevComm = prevInn.commentary?.[0];
+    const currentCommentary = currentInn.commentary || [];
+    const previousCommentary = prevInn.commentary || [];
 
-    if (currentComm && currentComm !== prevComm) {
+    // Undo exposes an older commentary entry at index zero. Only a growing
+    // authoritative feed represents a new event that should animate or sound.
+    if (currentCommentary.length <= previousCommentary.length) return;
+
+    const currentComm = currentCommentary[0];
+    const prevComm = previousCommentary[0];
+    const currentEventId = currentComm?.eventId || currentComm?.sequence || currentComm?._id;
+    const previousEventId = prevComm?.eventId || prevComm?.sequence || prevComm?._id;
+
+    if (currentComm && (!currentEventId || currentEventId !== previousEventId)) {
       const eventData = {
         type: null,
         value: currentComm.runs,
@@ -42,10 +67,8 @@ export const useEventTrigger = (match, onEvent) => {
       }
 
       if (eventData.type) {
-        onEvent(eventData);
+        onEventRef.current?.(eventData);
       }
     }
-
-    prevMatchRef.current = match;
-  }, [match, isHypeMode, onEvent]);
+  }, [match, isHypeMode]);
 };

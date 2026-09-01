@@ -10,27 +10,48 @@ export default function AdminMatches() {
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status,  setStatus]  = useState("all");
+  const [error, setError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
+  const [deletingId, setDeletingId] = useState("");
 
-  const load = () => {
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
     setLoading(true);
+    setError("");
     const params = { limit: 50 };
     if (status !== "all") params.status = status;
-    matchAPI.getAll(params)
-      .then(({ data }) => setMatches(data.matches || []))
-      .finally(() => setLoading(false));
-  };
+    matchAPI.getAll(params, { signal: controller.signal })
+      .then(({ data }) => {
+        if (active) setMatches(Array.isArray(data.matches) ? data.matches : []);
+      })
+      .catch((loadError) => {
+        if (active && loadError.code !== "ERR_CANCELED") {
+          setError(loadError.response?.data?.message || loadError.message || "Unable to load matches");
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
 
-  useEffect(load, [status]);
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [status, reloadToken]);
 
   const remove = async (id) => {
-    if (!confirm("Delete this match?")) return;
-    await matchAPI.remove(id);
-    load();
-  };
-
-  const setMatchStatus = async (id, newStatus) => {
-    await matchAPI.setStatus(id, { status: newStatus });
-    load();
+    if (deletingId || !window.confirm("Delete this match?")) return;
+    setDeletingId(id);
+    setError("");
+    try {
+      await matchAPI.remove(id);
+      setMatches((current) => current.filter((match) => match._id !== id));
+    } catch (removeError) {
+      setError(removeError.response?.data?.message || removeError.message || "Unable to delete match");
+    } finally {
+      setDeletingId("");
+    }
   };
 
   return (
@@ -38,7 +59,7 @@ export default function AdminMatches() {
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div>
           <h1 className="text-4xl font-black text-white uppercase italic tracking-tighter">Match <span className="text-brand-500">Registry</span></h1>
-          <p className="text-gray-500 text-[10px] font-black uppercase tracking-[0.3em] mt-2">Active and Scheduled Matchns</p>
+          <p className="text-gray-500 text-[10px] font-black uppercase tracking-[0.3em] mt-2">Active and Scheduled Matches</p>
         </div>
         <Link to="/admin/matches/new" className="h-14 px-10 rounded-2xl bg-brand-500 text-white text-xs font-black uppercase tracking-widest shadow-glow-orange hover:scale-105 transition-all flex items-center justify-center">
           + New Match
@@ -53,6 +74,13 @@ export default function AdminMatches() {
             }`}>{s}</button>
         ))}
       </div>
+
+      {error && (
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-red-500/20 bg-red-500/10 px-5 py-4 text-sm text-red-200">
+          <span>{error}. The last successfully loaded list is still shown.</span>
+          <button type="button" onClick={() => setReloadToken((token) => token + 1)} className="font-black uppercase tracking-widest hover:text-white">Retry</button>
+        </div>
+      )}
 
       {loading ? <Spinner /> : (
         <div className="card overflow-hidden border-white/5 bg-gray-900/40">
@@ -69,11 +97,9 @@ export default function AdminMatches() {
               </thead>
               <tbody className="divide-y divide-white/5">
                 {matches.length === 0 && (
-                  <tr><td colSpan={5} className="py-20 text-center text-gray-600 font-bold uppercase text-[10px] tracking-widest">No Matchns recorded.</td></tr>
+                  <tr><td colSpan={5} className="py-20 text-center text-gray-600 font-bold uppercase text-[10px] tracking-widest">No Matches recorded.</td></tr>
                 )}
                 {matches.map(m => {
-                  const inn = m.innings1;
-                  const score = inn ? `${inn.runs}/${inn.wickets}` : "—";
                   return (
                     <tr key={m._id} className="group hover:bg-white/[0.02] transition-colors">
                       <td className="py-6 px-8">
@@ -91,11 +117,11 @@ export default function AdminMatches() {
                       <td className="py-6 px-8 text-center"><StatusBadge status={m.status} /></td>
                       <td className="py-6 px-8">
                         <div className="flex items-center justify-end gap-3">
-                          {m.status !== "live" && (
-                            <button onClick={() => setMatchStatus(m._id, "live")}
-                              className="h-10 px-5 rounded-xl bg-red-600/10 text-red-500 text-[10px] font-black uppercase hover:bg-red-600 hover:text-white transition-all">
-                              Go Live
-                            </button>
+                          {m.status === "upcoming" && (
+                            <Link to={`/admin/matches/${m._id}/live`}
+                              className="h-10 px-5 rounded-xl bg-red-600/10 text-red-500 text-[10px] font-black uppercase hover:bg-red-600 hover:text-white transition-all flex items-center">
+                              Start / Toss
+                            </Link>
                           )}
                           {m.status === "live" && (
                             <Link to={`/admin/matches/${m._id}/live`}
@@ -107,8 +133,8 @@ export default function AdminMatches() {
                             className="h-10 px-5 rounded-xl bg-white/5 text-gray-400 text-[10px] font-black uppercase hover:text-white hover:bg-white/10 transition-all flex items-center">
                             Edit
                           </Link>
-                          <button onClick={() => remove(m._id)}
-                            className="w-10 h-10 rounded-xl bg-white/5 text-gray-600 hover:text-red-500 hover:bg-red-500/10 transition-all flex items-center justify-center">
+                          <button disabled={Boolean(deletingId)} onClick={() => { void remove(m._id); }}
+                            className="w-10 h-10 rounded-xl bg-white/5 text-gray-600 hover:text-red-500 hover:bg-red-500/10 transition-all flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-30">
                             ×
                           </button>
                         </div>

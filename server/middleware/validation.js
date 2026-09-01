@@ -1,136 +1,6 @@
 // server/middleware/validation.js
 
 /**
- * Validate match score update to prevent invalid cricket data
- */
-exports.validateScoreUpdate = (req, res, next) => {
-  const body = req.body || {};
-
-  // Backward-compatible contract: some clients send { action, data }
-  if (body.action) {
-    const { action, data } = body;
-
-    try {
-      switch (action) {
-        case "runs": {
-          if (typeof data?.runs !== "number" || data.runs < 0 || data.runs > 6) {
-            return res.status(400).json({ success: false, message: "Runs must be 0-6" });
-          }
-          if (typeof data?.wicket !== "boolean") {
-            return res.status(400).json({ success: false, message: "Wicket flag required" });
-          }
-          break;
-        }
-
-        case "wicket": {
-          if (!data?.batsmanName || !data?.bowlerName || !data?.dismissalType) {
-            return res.status(400).json({ success: false, message: "Wicket details incomplete" });
-          }
-          break;
-        }
-
-        case "extras": {
-          if (!["wide", "no-ball", "bye", "leg-bye"].includes(data?.type)) {
-            return res.status(400).json({ success: false, message: "Invalid extra type" });
-          }
-          if (typeof data?.runs !== "number" || data.runs < 0) {
-            return res.status(400).json({ success: false, message: "Invalid extra runs" });
-          }
-          break;
-        }
-
-        case "completedMatch": {
-          if (!data?.result || typeof data.result !== "string") {
-            return res.status(400).json({ success: false, message: "Match result required" });
-          }
-          break;
-        }
-
-        default:
-          return res.status(400).json({ success: false, message: "Unknown action" });
-      }
-
-      return next();
-    } catch {
-      return res.status(400).json({ success: false, message: "Invalid request data" });
-    }
-  }
-
-  // New contract (used by AdminLiveScoring.jsx): flat score payload.
-  // Required core fields
-  const { inningsNum, runs, isWicket, extraType, wicketType, batterName, bowlerName, outPlayerName } = body;
-
-  // inningsNum must exist and be 1 or 2 (or super-over innings handling is handled downstream)
-  if (inningsNum !== 1 && inningsNum !== 2) {
-    return res.status(400).json({ success: false, message: "inningsNum must be 1 or 2" });
-  }
-
-  // runs must be a finite number (frontend passes number-like values)
-  const normalizedRuns = typeof runs === "number" ? runs : Number(runs);
-  if (!Number.isFinite(normalizedRuns) || normalizedRuns < 0) {
-    return res.status(400).json({ success: false, message: "runs must be a non-negative number" });
-  }
-  // Standard deliveries capped at 6. Extras (wides/no-balls with overthrows) and
-  // bonus/penalty adjustments can legally exceed 6, so only cap for normal balls.
-  const isExtraDelivery = extraType === "wide" || extraType === "noBall" ||
-    extraType === "no-ball" || extraType === "bonus" || extraType === "penalty";
-  if (!isExtraDelivery && normalizedRuns > 6) {
-    return res.status(400).json({ success: false, message: "runs must be between 0 and 6 for a normal delivery" });
-  }
-  req.body.runs = normalizedRuns;
-
-  if (typeof isWicket !== "boolean") {
-    return res.status(400).json({ success: false, message: "isWicket flag required" });
-  }
-
-  // extraType validation (align to frontend naming)
-  if (extraType !== null && extraType !== undefined && extraType !== "") {
-    // Normalize middleware naming to match what the frontend actually sends
-    // (frontend uses noBall/legBye; some older clients might send no-ball/leg-bye)
-    const normalizedExtraType =
-      extraType === "no-ball" ? "noBall" :
-      extraType === "leg-bye" ? "legBye" :
-      extraType;
-
-    req.body.extraType = normalizedExtraType;
-
-    const allowed = ["wide", "noBall", "bye", "legBye", "bonus", "penalty"];
-    if (!allowed.includes(normalizedExtraType)) {
-      return res.status(400).json({ success: false, message: "Invalid extraType" });
-    }
-  }
-
-
-  // When wicket is true, require wicketType and out player
-  if (isWicket) {
-    if (!wicketType) {
-      return res.status(400).json({ success: false, message: "wicketType required for wicket" });
-    }
-    // bowlerName is optional for run-outs, retired hurt/out — fielder takes the wicket
-    const bowlerlessWickets = ["runOut", "retired-hurt", "retired-out", "obstructing-field"];
-    if (!bowlerName && !bowlerlessWickets.includes(wicketType)) {
-      return res.status(400).json({ success: false, message: "bowlerName required for this wicket type" });
-    }
-    const dismissed = outPlayerName || batterName;
-    if (!dismissed) {
-      return res.status(400).json({ success: false, message: "outPlayerName (or batterName) required for wicket" });
-    }
-  }
-
-  // bowlerName required for non-wicket, non-runout deliveries
-  if (!bowlerName && !isWicket) {
-    return res.status(400).json({ success: false, message: "bowlerName is required" });
-  }
-  if (!batterName && !isWicket) {
-    return res.status(400).json({ success: false, message: "batterName is required" });
-  }
-
-  // Accept extra payload fields (commentary, fielderName, etc.)
-  return next();
-};
-
-
-/**
  * Validate tournament ID existence and format
  */
 exports.validateTournamentId = async (req, res, next) => {
@@ -199,18 +69,19 @@ exports.acquireLock = (resourceId, timeout = 30000) => {
       return reject(new Error("Resource is being updated. Please try again."));
     }
 
-    updateLocks.set(resourceId, true);
-
-    // Auto-release after timeout
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       updateLocks.delete(resourceId);
     }, timeout);
+    timer.unref?.();
+    updateLocks.set(resourceId, timer);
 
     resolve();
   });
 };
 
 exports.releaseLock = (resourceId) => {
+  const timer = updateLocks.get(resourceId);
+  if (timer) clearTimeout(timer);
   updateLocks.delete(resourceId);
 };
 
@@ -227,10 +98,14 @@ exports.preventConcurrentUpdates = async (req, res, next) => {
   try {
     await exports.acquireLock(resourceId);
     
-    // Release lock when response is sent
-    res.on("finish", () => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
       exports.releaseLock(resourceId);
-    });
+    };
+    res.once("finish", release);
+    res.once("close", release);
 
     next();
   } catch (err) {
@@ -242,8 +117,10 @@ exports.preventConcurrentUpdates = async (req, res, next) => {
  * Validate request payload size
  */
 exports.validatePayloadSize = (req, res, next) => {
-  const maxSize = 5 * 1024 * 1024; // 5MB
-  if (req.headers["content-length"] > maxSize) {
+  // Multipart image uploads are mounted at /api/upload. Multer applies the
+  // stricter 5 MiB file limit; this small allowance covers multipart headers.
+  const maxSize = req.path.startsWith("/api/upload/") ? 6 * 1024 * 1024 : 1024 * 1024;
+  if (Number(req.headers["content-length"] || 0) > maxSize) {
     return res.status(413).json({ success: false, message: "Payload too large" });
   }
   next();
@@ -253,21 +130,33 @@ exports.validatePayloadSize = (req, res, next) => {
  * Sanitize and validate user input
  */
 exports.sanitizeInput = (req, res, next) => {
-  const sanitize = (obj) => {
+  const forbiddenKeys = new Set(["__proto__", "prototype", "constructor"]);
+  const preserveWhitespace = new Set(["password", "setupsecret", "secret", "token", "key"]);
+  let visited = 0;
+  const sanitize = (obj, depth = 0, field = "") => {
+    visited += 1;
+    if (visited > 10000 || depth > 12) throw new Error("Payload nesting is too deep");
+    if (typeof obj === "string") {
+      const normalizedField = String(field).toLowerCase();
+      const maxLength = normalizedField === "content" ? 100000 : 10000;
+      if (obj.length > maxLength) throw new Error(`${field || "String"} is too long`);
+      return preserveWhitespace.has(normalizedField) ? obj : obj.trim();
+    }
     if (typeof obj !== "object" || obj === null) return obj;
-    return Object.keys(obj).reduce((acc, key) => {
-      let value = obj[key];
-      if (typeof value === "string") {
-        value = value.trim().slice(0, 1000); // Limit string length
-      }
-      acc[key] = Array.isArray(value) ? value.map(sanitize) : sanitize(value);
-      return acc;
-    }, Array.isArray(obj) ? [] : {});
+    const output = Array.isArray(obj) ? [] : Object.create(null);
+    for (const key of Object.keys(obj)) {
+      if (forbiddenKeys.has(key)) throw new Error("Unsafe object key in payload");
+      output[key] = sanitize(obj[key], depth + 1, key);
+    }
+    return output;
   };
 
-  req.body = sanitize(req.body);
-  req.query = sanitize(req.query);
-  req.params = sanitize(req.params);
-
-  next();
+  try {
+    req.body = sanitize(req.body);
+    req.query = sanitize(req.query);
+    req.params = sanitize(req.params);
+    next();
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
 };

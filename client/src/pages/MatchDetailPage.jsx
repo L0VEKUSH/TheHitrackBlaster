@@ -1,7 +1,6 @@
-import { useParams, Link } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { useLiveMatch } from "../hooks/useLiveMatch";
-import { playerAPI } from "../services/api";
 import Spinner from "../components/common/Spinner";
 import { TabBar, FormatBadge, StatusBadge } from "../components/common/Spinner";
 import ScoreBoard from "../components/match/ScoreBoard";
@@ -18,6 +17,7 @@ import { MomentumMeter } from "../features/stats/MomentumMeter";
 import { WinProbability } from "../features/stats/WinProbability";
 import { QuickEmojiReactions } from "../features/social/QuickEmojiReactions";
 import MatchAIWidgets from "../components/MatchAIWidgets";
+import { getActiveInnings } from "../utils/matchSelectors";
 
 const getEmbedUrl = (url) => {
   if (!url) return null;
@@ -26,18 +26,45 @@ const getEmbedUrl = (url) => {
   return (match && match[2].length === 11) ? `https://www.youtube.com/embed/${match[2]}` : null;
 };
 
+function InningsScorecard({ innings, label }) {
+  if (!innings) return null;
+  const overs = innings.balls
+    ? `${Math.floor(innings.balls / 6)}.${innings.balls % 6}`
+    : "0.0";
+
+  return (
+    <div className="animate-fade-in space-y-4 pt-2">
+      <div className="flex items-center justify-between mb-3 bg-gray-900/50 p-3 rounded-xl border border-gray-800">
+        <h3 className="text-white font-bold text-sm flex items-center gap-2"><span className="text-brand-400">🏏</span> {innings.battingTeam} — {label}</h3>
+        <span className="text-white font-mono text-base font-black tracking-tight">
+          {innings.runs}/{innings.wickets} <span className="text-gray-400 text-xs ml-1 font-semibold">({overs} ov)</span>
+        </span>
+      </div>
+      <BattingTable batsmen={innings.batsmen || []} />
+      <div className="mt-4 pt-4 border-t border-gray-800/50">
+        <h4 className="text-gray-400 text-[10px] font-black uppercase tracking-widest mb-3 flex items-center gap-2"><span className="text-brand-400">🎳</span> Bowling</h4>
+        <BowlingTable bowlers={innings.bowlers || []} />
+      </div>
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <FallOfWickets fallOfWickets={innings.fallOfWickets || []} />
+        <PartnershipsTable partnerships={innings.partnerships || []} />
+      </div>
+    </div>
+  );
+}
+
 export default function MatchDetailPage() {
   const { id }  = useParams();
   const { match, loading, error } = useLiveMatch(id);
   const [tab, setTab] = useState("scorecard");
   const { isHypeMode } = useHype();
   const [lastEvent, setLastEvent] = useState(null);
-  const [playersMap, setPlayersMap] = useState({});   // name → _id
-  const [activeInnTab, setActiveInnTab] = useState(1);
+  const [activeInnTab, setActiveInnTab] = useState("regulation-1");
 
   useEffect(() => {
-    if (match?.currentInnings) setActiveInnTab(match.currentInnings);
-  }, [match?.currentInnings]);
+    if (!match?.currentInnings) return;
+    setActiveInnTab(`${match.isSuperOver ? "superOver" : "regulation"}-${match.currentInnings}`);
+  }, [match?._id, match?.currentInnings, match?.isSuperOver]);
 
   // Handle Match Events
   const onMatchEvent = useCallback((event) => {
@@ -46,31 +73,9 @@ export default function MatchDetailPage() {
 
   useEventTrigger(match, onMatchEvent);
 
-  // Build player name → _id map when statistics exist
-  useEffect(() => {
-    if (match?.statistics && Object.keys(match.statistics).length > 0 && Object.keys(playersMap).length === 0) {
-      playerAPI.getAll({ limit: 500 })
-        .then(({ data }) => {
-          const map = {};
-          (data.players || []).forEach(p => { map[p.name] = p._id; });
-          setPlayersMap(map);
-        })
-        .catch(() => {});
-    }
-  }, [match]);
-
-  // Helper: render a player name as link if ID known
-  const PlayerLink = ({ name }) => {
-    if (!name) return null;
-    const pid = playersMap[name];
-    return pid
-      ? <Link to={`/players/${pid}`} className="text-brand-400 hover:text-brand-300 hover:underline transition-colors font-semibold">{name}</Link>
-      : <span className="font-semibold text-white">{name}</span>;
-  };
-
   const isClutchMode = useMemo(() => {
     if (!match || match.status !== "live") return false;
-    const currentInn = match.currentInnings === 2 ? match.innings2 : match.innings1;
+    const currentInn = getActiveInnings(match);
     if (!currentInn) return false;
 
     // Last 2 overs (12 balls)
@@ -80,7 +85,9 @@ export default function MatchDetailPage() {
 
     // Close match in 2nd innings
     if (match.currentInnings === 2 && match.target > 0) {
-      const runsLeft = match.target - currentInn.runs;
+      const runsLeft = match.requiredRuns == null
+        ? match.target - currentInn.runs
+        : Number(match.requiredRuns);
       if (runsLeft > 0 && runsLeft <= ballsLeft * 1.5) return true;
     }
 
@@ -94,6 +101,21 @@ export default function MatchDetailPage() {
 
   const inn1 = match.innings1;
   const inn2 = match.innings2;
+  const superOverInn1 = match.superOverInnings1;
+  const superOverInn2 = match.superOverInnings2;
+  const inningsTabs = [
+    inn1 && { key: "regulation-1", innings: inn1, label: "1st Innings", shortLabel: `${inn1.battingTeam || match.teamA} (1st Inn)` },
+    inn2 && { key: "regulation-2", innings: inn2, label: "2nd Innings", shortLabel: `${inn2.battingTeam || match.teamB} (2nd Inn)` },
+    superOverInn1 && { key: "superOver-1", innings: superOverInn1, label: "Super Over · 1st Innings", shortLabel: `${superOverInn1.battingTeam || match.teamA} (SO 1)` },
+    superOverInn2 && { key: "superOver-2", innings: superOverInn2, label: "Super Over · 2nd Innings", shortLabel: `${superOverInn2.battingTeam || match.teamB} (SO 2)` },
+  ].filter(Boolean);
+  const selectedInningsTab = inningsTabs.find((entry) => entry.key === activeInnTab) || inningsTabs[0];
+  const commentarySections = [
+    superOverInn2 && { key: "superOver-2", label: "Super Over · 2nd Innings", innings: superOverInn2 },
+    superOverInn1 && { key: "superOver-1", label: "Super Over · 1st Innings", innings: superOverInn1 },
+    inn2 && { key: "regulation-2", label: "2nd Innings", innings: inn2 },
+    inn1 && { key: "regulation-1", label: "1st Innings", innings: inn1 },
+  ].filter((entry) => entry?.innings?.commentary?.length > 0);
   const embedUrl = getEmbedUrl(match.videoUrl);
 
   const TABS = [
@@ -162,85 +184,37 @@ export default function MatchDetailPage() {
                 {tab === "scorecard" && (
                   <div className="space-y-4">
                     {/* Innings Tabs */}
-                    {(inn1 || inn2) && (
-                      <div className="flex gap-2 border-b border-gray-800 pb-3">
-                        {inn1 && (
+                    {inningsTabs.length > 0 && (
+                      <div className="flex gap-2 border-b border-gray-800 pb-3 overflow-x-auto">
+                        {inningsTabs.map((entry) => (
                           <button
-                            onClick={() => setActiveInnTab(1)}
-                            className={`px-4 py-2 text-sm font-bold rounded-xl transition-colors ${activeInnTab === 1 ? "bg-brand-500 text-white shadow-lg shadow-brand-500/20" : "bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-700/50"}`}
+                            key={entry.key}
+                            onClick={() => setActiveInnTab(entry.key)}
+                            className={`shrink-0 px-4 py-2 text-sm font-bold rounded-xl transition-colors ${activeInnTab === entry.key ? "bg-brand-500 text-white shadow-lg shadow-brand-500/20" : "bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-700/50"}`}
                           >
-                            {inn1.battingTeam || match.teamA} (1st Inn)
+                            {entry.shortLabel}
                           </button>
-                        )}
-                        {inn2 && (
-                          <button
-                            onClick={() => setActiveInnTab(2)}
-                            className={`px-4 py-2 text-sm font-bold rounded-xl transition-colors ${activeInnTab === 2 ? "bg-brand-500 text-white shadow-lg shadow-brand-500/20" : "bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-700/50"}`}
-                          >
-                            {inn2.battingTeam || match.teamB} (2nd Inn)
-                          </button>
-                        )}
+                        ))}
                       </div>
                     )}
 
-                    {activeInnTab === 1 && inn1 && (
-                      <div className="animate-fade-in space-y-4 pt-2">
-                        <div className="flex items-center justify-between mb-3 bg-gray-900/50 p-3 rounded-xl border border-gray-800">
-                          <h3 className="text-white font-bold text-sm flex items-center gap-2"><span className="text-brand-400">🏏</span> {inn1.battingTeam} — 1st Innings</h3>
-                          <span className="text-white font-mono text-base font-black tracking-tight">
-                            {inn1.runs}/{inn1.wickets} <span className="text-gray-400 text-xs ml-1 font-semibold">({inn1.balls ? `${Math.floor(inn1.balls/6)}.${inn1.balls%6}` : "0.0"} ov)</span>
-                          </span>
-                        </div>
-                        <BattingTable batsmen={inn1.batsmen || []} />
-                        <div className="mt-4 pt-4 border-t border-gray-800/50">
-                          <h4 className="text-gray-400 text-[10px] font-black uppercase tracking-widest mb-3 flex items-center gap-2"><span className="text-brand-400">🎳</span> Bowling</h4>
-                          <BowlingTable bowlers={inn1.bowlers || []} />
-                        </div>
-                        <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                          <FallOfWickets fallOfWickets={inn1.fallOfWickets || []} />
-                          <PartnershipsTable partnerships={inn1.partnerships || []} />
-                        </div>
-                      </div>
+                    {selectedInningsTab && (
+                      <InningsScorecard innings={selectedInningsTab.innings} label={selectedInningsTab.label} />
                     )}
 
-                    {activeInnTab === 2 && inn2 && (
-                      <div className="animate-fade-in space-y-4 pt-2">
-                        <div className="flex items-center justify-between mb-3 bg-gray-900/50 p-3 rounded-xl border border-gray-800">
-                          <h3 className="text-white font-bold text-sm flex items-center gap-2"><span className="text-brand-400">🏏</span> {inn2.battingTeam} — 2nd Innings</h3>
-                          <span className="text-white font-mono text-base font-black tracking-tight">
-                            {inn2.runs}/{inn2.wickets} <span className="text-gray-400 text-xs ml-1 font-semibold">({inn2.balls ? `${Math.floor(inn2.balls/6)}.${inn2.balls%6}` : "0.0"} ov)</span>
-                          </span>
-                        </div>
-                        <BattingTable batsmen={inn2.batsmen || []} />
-                        <div className="mt-4 pt-4 border-t border-gray-800/50">
-                          <h4 className="text-gray-400 text-[10px] font-black uppercase tracking-widest mb-3 flex items-center gap-2"><span className="text-brand-400">🎳</span> Bowling</h4>
-                          <BowlingTable bowlers={inn2.bowlers || []} />
-                        </div>
-                        <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                          <FallOfWickets fallOfWickets={inn2.fallOfWickets || []} />
-                          <PartnershipsTable partnerships={inn2.partnerships || []} />
-                        </div>
-                      </div>
-                    )}
-
-                    {!inn1 && !inn2 && <p className="text-gray-600 text-sm text-center py-8">No scorecard data yet</p>}
+                    {inningsTabs.length === 0 && <p className="text-gray-600 text-sm text-center py-8">No scorecard data yet</p>}
                   </div>
                 )}
 
                 {tab === "commentary" && (
                   <div>
-                    {match.currentInnings === 2 && inn2?.commentary?.length > 0 && (
-                      <div className="mb-6">
-                        <h3 className="text-gray-400 text-xs font-semibold uppercase tracking-wide mb-3">2nd Innings</h3>
-                        <CommentaryFeed commentary={inn2.commentary} />
+                    {commentarySections.map((section, index) => (
+                      <div key={section.key} className={index > 0 ? "mt-6 pt-4 border-t border-gray-800" : ""}>
+                        <h3 className="text-gray-400 text-xs font-semibold uppercase tracking-wide mb-3">{section.label}</h3>
+                        <CommentaryFeed commentary={section.innings.commentary} />
                       </div>
-                    )}
-                    {inn1?.commentary?.length > 0 && (
-                      <div>
-                        {match.currentInnings === 2 && <h3 className="text-gray-400 text-xs font-semibold uppercase tracking-wide mb-3 mt-4 pt-4 border-t border-gray-800">1st Innings</h3>}
-                        <CommentaryFeed commentary={inn1.commentary} />
-                      </div>
-                    )}
+                    ))}
+                    {commentarySections.length === 0 && <CommentaryFeed commentary={[]} />}
                   </div>
                 )}
 

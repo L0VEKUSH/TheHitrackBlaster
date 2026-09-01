@@ -1,56 +1,103 @@
 // src/hooks/useLiveMatch.js
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import axios from "axios";
 import { io } from "socket.io-client";
 import { matchAPI } from "../services/api";
+import { shouldReplaceMatchState } from "../utils/matchSelectors";
 
 export function useLiveMatch(matchId) {
-  const [match, setMatch] = useState(null);
+  const [match, setMatchState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const socketRef = useRef(null);
-  const retryCountRef = useRef(0);
-  const isMountedRef = useRef(true);
+  const matchRef = useRef(null);
+  const refetchRef = useRef(null);
+  const requestedMatchIdRef = useRef(matchId == null ? "" : String(matchId));
+  requestedMatchIdRef.current = matchId == null ? "" : String(matchId);
 
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
+  // Every source passes through one monotonic gate. Newer snapshots replace
+  // state wholesale so nested fields from different database versions never mix.
+  const acceptSnapshot = useCallback((candidate) => {
+    if (!candidate || typeof candidate !== "object") return false;
+    const requestedMatchId = requestedMatchIdRef.current;
+    if (!shouldReplaceMatchState(matchRef.current, candidate, requestedMatchId)) return false;
+    matchRef.current = candidate;
+    setMatchState((current) => {
+      if (!shouldReplaceMatchState(current, candidate, requestedMatchIdRef.current)) return current;
+      return candidate;
+    });
+    return true;
+  }, []);
+
+  const refetch = useCallback(() => {
+    if (!refetchRef.current) return Promise.resolve(null);
+    return refetchRef.current({ retries: 0, reportFailure: true });
   }, []);
 
   useEffect(() => {
-    if (!matchId) return;
+    if (!matchId) {
+      matchRef.current = null;
+      setMatchState(null);
+      setLoading(false);
+      setIsConnected(false);
+      return undefined;
+    }
 
-    // Initial fetch with retry
-    const fetchMatch = async (retries = 3) => {
+    let active = true;
+    let fetchController = null;
+    const retryTimers = new Set();
+    let reconnectAttempts = 0;
+
+    matchRef.current = null;
+    setMatchState(null);
+    setLoading(true);
+    setError(null);
+    setIsConnected(false);
+
+    const fetchMatch = async ({ retries = 0, reportFailure = false } = {}) => {
+      if (!active) return null;
+
+      // A reconnect/refetch supersedes an older GET and cancels its timeout.
+      fetchController?.abort();
+      const controller = new AbortController();
+      fetchController = controller;
+
       try {
-        const { data } = await matchAPI.getById(matchId);
-        if (isMountedRef.current) {
-          setMatch(data.match);
-          setError(null);
-          setLoading(false);
-        }
+        const { data } = await matchAPI.getById(matchId, { signal: controller.signal });
+        if (!active || controller.signal.aborted) return null;
+        const accepted = acceptSnapshot(data.match);
+        setError(null);
+        setLoading(false);
+        return accepted ? data.match : matchRef.current;
       } catch (err) {
+        if (!active || controller.signal.aborted || axios.isCancel(err)) return null;
+
         if (retries > 0) {
-          setTimeout(() => fetchMatch(retries - 1), 2000);
-        } else {
-          if (isMountedRef.current) {
-            setError(err.response?.data?.message || err.message || "Failed to load match");
-            setLoading(false);
-          }
+          const timer = window.setTimeout(() => {
+            retryTimers.delete(timer);
+            void fetchMatch({ retries: retries - 1, reportFailure });
+          }, 2000);
+          retryTimers.add(timer);
+          return null;
         }
+
+        if (reportFailure || !matchRef.current) {
+          setError(err.response?.data?.message || err.message || "Failed to load match");
+        }
+        setLoading(false);
+        return null;
+      } finally {
+        if (fetchController === controller) fetchController = null;
       }
     };
 
-    fetchMatch();
+    refetchRef.current = fetchMatch;
+    void fetchMatch({ retries: 3, reportFailure: true });
 
-    // Socket connection with error handling
     const rawSocketUrl = import.meta.env.VITE_API_URL || window.location.origin;
     const socketUrl = rawSocketUrl.trim().replace(/\/+$/g, "").replace(/\/api$/i, "") || window.location.origin;
-
-    // Polling first — Render and some proxies close WebSocket before it is established
-    socketRef.current = io(socketUrl, {
+    const socket = io(socketUrl, {
       path: "/socket.io",
       reconnection: true,
       reconnectionDelay: 1000,
@@ -60,83 +107,91 @@ export function useLiveMatch(matchId) {
       upgrade: true,
       timeout: 20000,
     });
+    socketRef.current = socket;
 
-    // Connection handlers
     const handleConnect = () => {
-      if (isMountedRef.current) {
-        setIsConnected(true);
-        retryCountRef.current = 0;
-        socketRef.current?.emit("joinMatch", String(matchId), (callback) => {
-          if (callback?.error) {
-            console.error("Failed to join match room:", callback.error);
-          }
-        });
-      }
-    };
-
-    const handleDisconnect = (reason) => {
-      if (isMountedRef.current) {
-        setIsConnected(false);
-        console.warn("Socket disconnected:", reason);
-        // Auto-reconnect is handled by Socket.IO config
-      }
-    };
-
-    const handleScoreUpdate = (updatedMatch) => {
-      if (!isMountedRef.current || !updatedMatch) return;
-      // Live score payloads often omit statistics; keep previous awards/stats
-      setMatch((prev) => {
-        const hasStats =
-          updatedMatch.statistics &&
-          typeof updatedMatch.statistics === "object" &&
-          Object.keys(updatedMatch.statistics).length > 0;
-        return {
-          ...updatedMatch,
-          statistics: hasStats ? updatedMatch.statistics : prev?.statistics,
-        };
+      if (!active) return;
+      setIsConnected(true);
+      reconnectAttempts = 0;
+      setError(null);
+      socket.emit("joinMatch", String(matchId), (callback) => {
+        if (callback?.error) {
+          console.error("Failed to join match room:", callback.error);
+          return;
+        }
+        // Refetch only after the room join is acknowledged, closing the gap
+        // between the HTTP snapshot and live subscription.
+        void fetchMatch({ retries: 1, reportFailure: false });
       });
     };
 
-    const handleError = (error) => {
-      console.error("Socket error:", error);
-      if (isMountedRef.current) {
-        setError(`Connection error: ${error?.message || "Unknown error"}`);
+    const handleDisconnect = (reason) => {
+      if (!active) return;
+      setIsConnected(false);
+      console.warn("Socket disconnected:", reason);
+    };
+
+    const handleScoreUpdate = (updatedMatch) => {
+      if (!active || !updatedMatch) return;
+      const updatedId = updatedMatch._id ? String(updatedMatch._id) : "";
+      if (updatedId && updatedId !== String(matchId)) return;
+      acceptSnapshot(updatedMatch);
+    };
+
+    const handleConnectError = (socketError) => {
+      console.warn("Live update connection error:", socketError?.message || socketError);
+      // Keep rendering a valid GET snapshot while Socket.IO reconnects.
+      if (active && !matchRef.current) {
+        setError(`Connection error: ${socketError?.message || "Unknown error"}`);
       }
     };
 
     const handleReconnectAttempt = () => {
-      retryCountRef.current++;
-      if (retryCountRef.current > 5) {
-        if (isMountedRef.current) {
-          setError("Unable to reconnect to live updates. Please refresh the page.");
-        }
+      reconnectAttempts += 1;
+      if (active && reconnectAttempts > 5 && !matchRef.current) {
+        setError("Unable to reconnect to live updates. Please refresh the page.");
       }
     };
 
-    // Register listeners
-    socketRef.current.on("connect", handleConnect);
-    socketRef.current.on("disconnect", handleDisconnect);
-    socketRef.current.on("scoreUpdate", handleScoreUpdate);
-    socketRef.current.on("error", handleError);
-    socketRef.current.on("reconnect_attempt", handleReconnectAttempt);
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+    socket.on("scoreUpdate", handleScoreUpdate);
+    socket.on("connect_error", handleConnectError);
+    socket.io.on("reconnect_attempt", handleReconnectAttempt);
 
-    const socket = socketRef.current;
+    // Socket.IO is primary. While it is unavailable, bounded polling keeps the
+    // viewer current without overlapping requests or duplicate intervals.
+    const fallbackPoll = window.setInterval(() => {
+      if (active && !socket.connected) void fetchMatch({ retries: 0, reportFailure: false });
+    }, 5000);
 
-    // Cleanup
     return () => {
-      if (!socket) return;
+      active = false;
+      retryTimers.forEach((timer) => window.clearTimeout(timer));
+      retryTimers.clear();
+      fetchController?.abort();
+      window.clearInterval(fallbackPoll);
+      if (refetchRef.current === fetchMatch) refetchRef.current = null;
+
       socket.off("connect", handleConnect);
       socket.off("disconnect", handleDisconnect);
       socket.off("scoreUpdate", handleScoreUpdate);
-      socket.off("error", handleError);
-      socket.off("reconnect_attempt", handleReconnectAttempt);
-      if (socket.connected) {
-        socket.emit("leaveMatch", String(matchId));
-      }
+      socket.off("connect_error", handleConnectError);
+      socket.io.off("reconnect_attempt", handleReconnectAttempt);
+      if (socket.connected) socket.emit("leaveMatch", String(matchId));
       socket.disconnect();
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [matchId]);
+  }, [acceptSnapshot, matchId]);
 
-  return { match, loading, error, setMatch, isConnected };
+  const visibleMatch = shouldReplaceMatchState(null, match, matchId) ? match : null;
+
+  return {
+    match: visibleMatch,
+    loading: loading || Boolean(match && !visibleMatch),
+    error,
+    setMatch: acceptSnapshot,
+    refetch,
+    isConnected,
+  };
 }

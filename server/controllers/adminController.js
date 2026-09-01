@@ -35,6 +35,9 @@ exports.createAdmin = async (req, res) => {
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, message: "Name, email, and password are required" });
     }
+    if (String(password).length < 12) {
+      return res.status(400).json({ success: false, message: "Password must be at least 12 characters" });
+    }
 
     const existing = await Admin.findOne({ email });
     if (existing) {
@@ -43,7 +46,7 @@ exports.createAdmin = async (req, res) => {
 
     const admin = await Admin.create({
       name,
-      email,
+      email: String(email).trim().toLowerCase(),
       password,
       role: role || "editor",
       isActive: typeof isActive === "boolean" ? isActive : true
@@ -60,6 +63,21 @@ exports.updateAdmin = async (req, res) => {
     const admin = await Admin.findById(req.params.id);
     if (!admin) return res.status(404).json({ success: false, message: "Admin not found" });
 
+    const removesActiveSuperadmin = admin.role === "superadmin" && admin.isActive &&
+      ((req.body.role && req.body.role !== "superadmin") || req.body.isActive === false);
+    if (removesActiveSuperadmin) {
+      const activeSuperadmins = await Admin.countDocuments({ role: "superadmin", isActive: true });
+      if (activeSuperadmins <= 1) {
+        return res.status(409).json({ success: false, message: "At least one active superadmin must remain" });
+      }
+    }
+    if (req.admin._id.equals(admin._id) && req.body.isActive === false) {
+      return res.status(409).json({ success: false, message: "Cannot deactivate your own active session" });
+    }
+    if (req.body.password && String(req.body.password).length < 12) {
+      return res.status(400).json({ success: false, message: "Password must be at least 12 characters" });
+    }
+
     if (req.body.email && req.body.email !== admin.email) {
       const existing = await Admin.findOne({ email: req.body.email });
       if (existing) {
@@ -68,7 +86,7 @@ exports.updateAdmin = async (req, res) => {
     }
 
     if (req.body.name) admin.name = req.body.name;
-    if (req.body.email) admin.email = req.body.email;
+    if (req.body.email) admin.email = String(req.body.email).trim().toLowerCase();
     if (req.body.password) admin.password = req.body.password;
     if (req.body.role) admin.role = req.body.role;
     if (typeof req.body.isActive === "boolean") admin.isActive = req.body.isActive;

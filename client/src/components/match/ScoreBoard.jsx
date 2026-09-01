@@ -1,8 +1,10 @@
 // src/components/match/ScoreBoard.jsx
+import { getActiveInnings, getPreviousInnings } from "../../utils/matchSelectors";
+
 export default function ScoreBoard({ match }) {
   if (!match) return null;
-  const inn = match.currentInnings === 2 ? match.innings2 : match.innings1;
-  const prev = match.currentInnings === 2 ? match.innings1 : null;
+  const inn = getActiveInnings(match);
+  const prev = getPreviousInnings(match);
   const inningsOvers = match.isSuperOver ? 1 : (match.overs || 20);
   const totalBalls = inningsOvers * 6;
   const overs = inn?.balls
@@ -14,12 +16,20 @@ export default function ScoreBoard({ match }) {
   const ballsLeft = totalBalls > 0
     ? Math.max(0, totalBalls - (inn?.balls || 0))
     : null;
-  const targetValue = match.isSuperOver && match.currentInnings === 2
-    ? (match.superOverInnings1?.runs || 0) + 1
-    : (match.target || ((match.innings1?.runs || 0) + 1));
+  const persistedTarget = Number(match.target);
+  const targetValue = Number.isFinite(persistedTarget) && persistedTarget > 0
+    ? persistedTarget
+    : (match.currentInnings === 2 && prev ? (prev.runs || 0) + 1 : 0);
+  const persistedRequiredRuns = match.requiredRuns == null ? null : Number(match.requiredRuns);
   const runsLeft = match.currentInnings === 2 && targetValue > 0
-    ? Math.max(0, targetValue - (inn?.runs || 0))
+    ? Math.max(0, Number.isFinite(persistedRequiredRuns)
+      ? persistedRequiredRuns
+      : targetValue - (inn?.runs || 0))
     : null;
+  const persistedRequiredRunRate = Number(match.requiredRunRate);
+  const requiredRunRate = Number.isFinite(persistedRequiredRunRate) && persistedRequiredRunRate >= 0
+    ? persistedRequiredRunRate
+    : (ballsLeft > 0 && runsLeft > 0 ? runsLeft / (ballsLeft / 6) : 0);
   const hasResult = match.status === "completed" && !!match.result;
   const isSuper = match.isSuperOver;
   const inningsLabel = isSuper
@@ -101,6 +111,11 @@ export default function ScoreBoard({ match }) {
                 {ballsLeft !== null && ballsLeft > 0 && (
                   <div className="text-[10px] font-bold text-white/60">
                     OFF {ballsLeft} BALLS
+                  </div>
+                )}
+                {runsLeft > 0 && (
+                  <div className="text-[10px] font-bold text-white/60">
+                    RRR {requiredRunRate.toFixed(2)}
                   </div>
                 )}
               </div>

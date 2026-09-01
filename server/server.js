@@ -1,4 +1,6 @@
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
+require("dotenv").config({ path: path.join(__dirname, "..", ".env"), override: false });
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -7,28 +9,31 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 const mongoSanitize = require("express-mongo-sanitize");
-const xssClean = require("xss-clean");
 const connectDB = require("./config/db");
 const { runDatabaseBackup, startAutomaticBackups, stopAutomaticBackups, canRunBackups } = require("./config/backupManager");
 const mongoose = require("mongoose");
 const { validatePayloadSize, sanitizeInput } = require("./middleware/validation");
+const { validateProductionSecrets } = require("./utils/securityConfig");
 
 /* ── ENVIRONMENT VALIDATION ────────────────────────── */
 const requiredEnvVars = ["JWT_SECRET", "MONGO_URI"];
 const missing = requiredEnvVars.filter(v => !process.env[v]);
 if (missing.length > 0) {
   console.error(`❌ Missing environment variables: ${missing.join(", ")}`);
+  if (process.env.NODE_ENV === "production") process.exit(1);
+}
+
+if (process.env.NODE_ENV === "production") {
+  const secretErrors = validateProductionSecrets(process.env);
+  if (secretErrors.length > 0) {
+    for (const error of secretErrors) console.error(`❌ ${error}`);
+    process.exit(1);
+  }
 }
 
 const app = express();
 const server = http.createServer(app);
-const defaultOrigins = [
-  "http://localhost:5173",
-  "https://the-hitrack-blaster-2clhawl0e-lovekush-kumar-s-projects.vercel.app",
-  "https://the-hitrack-blaster-33exmbtlr-lovekush-kumar-s-projects.vercel.app",
-  "https://*.vercel.app",
-  "https://*.onrender.com"
-];
+const defaultOrigins = process.env.NODE_ENV === "production" ? [] : ["http://localhost:5173"];
 const rawOrigins = [
   ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : []),
   ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : []),
@@ -37,10 +42,18 @@ const rawOrigins = [
   .map((url) => url.trim().replace(/\/+$|\/$/g, "").toLowerCase())
   .filter(Boolean);
 const allowedOrigins = Array.from(new Set(rawOrigins));
-const allowAllOrigins = process.env.ALLOW_ALL_ORIGINS === "true" || allowedOrigins.includes("*");
+if (process.env.NODE_ENV === "production" && (
+  allowedOrigins.length === 0 || allowedOrigins.some((origin) => origin.includes("*"))
+)) {
+  console.error("❌ Production CORS requires at least one explicit CLIENT_URL or ALLOWED_ORIGINS entry; wildcards are not accepted");
+  process.exit(1);
+}
+const allowAllOrigins = process.env.NODE_ENV !== "production" &&
+  (process.env.ALLOW_ALL_ORIGINS === "true" || allowedOrigins.includes("*"));
 
 const normalizeOrigin = (origin) => origin?.trim().replace(/\/+$/g, "");
 const wildcardMatch = (origin, pattern) => {
+  if (pattern.includes("*") && process.env.NODE_ENV === "production") return false;
   if (!pattern.includes("*")) return false;
   const escapedPattern = pattern
     .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
@@ -114,44 +127,97 @@ const io = new Server(server, {
 /* ── DATABASE INITIALIZATION WITH RETRY ────────────── */
 let dbConnected = false;
 let autoBackupsStarted = false;
-const initializeDB = async (retries = 3) => {
-  try {
-    await connectDB();
-    dbConnected = true;
-    console.log("✅ Database connected");
+let statsRebuildScheduled = false;
+let databaseConnectInFlight = null;
+let databaseReconnectTimer = null;
+let shuttingDown = false;
+const databaseReconnectIntervalMs = Math.max(
+  5000,
+  Number(process.env.DB_RECONNECT_INTERVAL_MS) || 15000
+);
 
-    if (!autoBackupsStarted) {
-      const autoBackupIntervalMinutes = Number(process.env.AUTO_BACKUP_INTERVAL_MINUTES || 15);
-      const autoBackupRetention = Number(process.env.AUTO_BACKUP_RETENTION || 5);
-      // Only start automatic backups when the environment supports it
-      if (canRunBackups()) {
-        startAutomaticBackups(autoBackupIntervalMinutes, autoBackupRetention);
-      } else {
-        console.warn("⚠️ Automatic backups disabled: mongodump not available and no S3 configured");
+const clearDatabaseReconnect = () => {
+  if (databaseReconnectTimer) clearTimeout(databaseReconnectTimer);
+  databaseReconnectTimer = null;
+};
+
+const scheduleDatabaseReconnect = () => {
+  if (shuttingDown || dbConnected || databaseReconnectTimer) return;
+  databaseReconnectTimer = setTimeout(() => {
+    databaseReconnectTimer = null;
+    initializeDB(1).catch((error) => {
+      console.error("❌ Background database reconnect failed:", error.message);
+    });
+  }, databaseReconnectIntervalMs);
+  databaseReconnectTimer.unref?.();
+};
+
+mongoose.connection.on("connected", () => {
+  dbConnected = true;
+  clearDatabaseReconnect();
+});
+mongoose.connection.on("disconnected", () => {
+  dbConnected = false;
+  scheduleDatabaseReconnect();
+});
+mongoose.connection.on("error", () => { dbConnected = false; });
+const initializeDB = async (maxAttempts = 3) => {
+  if (dbConnected) return true;
+  if (databaseConnectInFlight) return databaseConnectInFlight;
+
+  const attempts = Math.max(1, Number(maxAttempts) || 1);
+  databaseConnectInFlight = (async () => {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await connectDB();
+        dbConnected = true;
+        clearDatabaseReconnect();
+        console.log("✅ Database connected");
+
+        if (!autoBackupsStarted) {
+          const autoBackupIntervalMinutes = Number(process.env.AUTO_BACKUP_INTERVAL_MINUTES || 15);
+          const autoBackupRetention = Number(process.env.AUTO_BACKUP_RETENTION || 5);
+          if (canRunBackups()) {
+            startAutomaticBackups(autoBackupIntervalMinutes, autoBackupRetention);
+          } else {
+            console.warn("⚠️ Automatic backups disabled: mongodump not available and no S3 configured");
+          }
+          autoBackupsStarted = true;
+        }
+
+        if (!statsRebuildScheduled) {
+          statsRebuildScheduled = true;
+          try {
+            const { rebuildAllPlayerStats } = require("./controllers/playerController");
+            setImmediate(() => {
+              rebuildAllPlayerStats().catch(err =>
+                console.error("⚠️  Startup player stats rebuild failed:", err.message)
+              );
+            });
+          } catch (err) {
+            statsRebuildScheduled = false;
+            console.error("⚠️  Failed to schedule player stats rebuild:", err.message);
+          }
+        }
+        return true;
+      } catch (err) {
+        console.error(`❌ Database connection failed (attempt ${attempt}/${attempts}):`, err.message);
+        if (attempt < attempts) {
+          console.log("⏳ Retrying in 5 seconds...");
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
       }
-      autoBackupsStarted = true;
     }
-    
-    // Non-blocking player stats rebuild
-    try {
-      const { rebuildAllPlayerStats } = require("./controllers/playerController");
-      setImmediate(() => {
-        rebuildAllPlayerStats().catch(err => 
-          console.error("⚠️  Startup player stats rebuild failed:", err.message)
-        );
-      });
-    } catch (err) {
-      console.error("⚠️  Failed to schedule player stats rebuild:", err.message);
-    }
-  } catch (err) {
-    console.error(`❌ Database connection failed (attempt ${4 - retries + 1}/3):`, err.message);
-    if (retries > 0) {
-      console.log(`⏳ Retrying in 5 seconds...`);
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      return initializeDB(retries - 1);
-    }
-    console.error("❌ Failed to connect to database after 3 attempts — starting server without DB connection. Requests depending on DB will return 503 until connection is restored.");
-    // Do not exit here; allow server to start and return 503 for API calls until DB becomes available.
+
+    console.error(`❌ Database unavailable after ${attempts} attempt(s). API requests will return 503; a non-overlapping background reconnect is scheduled.`);
+    scheduleDatabaseReconnect();
+    return false;
+  })();
+
+  try {
+    return await databaseConnectInFlight;
+  } finally {
+    databaseConnectInFlight = null;
   }
 };
 
@@ -164,7 +230,7 @@ const corsOptions = {
   credentials: true,
   optionsSuccessStatus: 200,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With", "Idempotency-Key", "If-Match-Version"],
   preflightContinue: false
 };
 
@@ -180,7 +246,7 @@ app.use((req, res, next) => {
       res.setHeader("Access-Control-Allow-Origin", requestOrigin);
       res.setHeader("Access-Control-Allow-Credentials", "true");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With, Idempotency-Key, If-Match-Version");
       res.setHeader("Vary", "Origin");
     }
   } catch (e) {
@@ -189,12 +255,11 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(mongoSanitize());
-app.use(xssClean());
 app.use(morgan("dev"));
-app.use(express.json({ limit: "5mb" }));
-app.use(express.urlencoded({ extended: false, limit: "5mb" }));
 app.use(validatePayloadSize);
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+app.use(mongoSanitize());
 app.use(sanitizeInput);
 
 // Middleware to prefix relative /uploads/ paths with the server's absolute host URL
@@ -255,17 +320,29 @@ app.use((req, res, next) => {
 });
 
 // General Rate Limiting
-const generalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { success: false, message: "Too many requests, please try again later." } });
+// A disconnected viewer polls every five seconds. The default leaves room for
+// several viewers behind one NAT while the auth endpoints remain much stricter.
+const generalRateLimitMax = Math.max(100, Number(process.env.GENERAL_RATE_LIMIT_MAX) || 2000);
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: generalRateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many requests, please try again later." }
+});
 app.use("/api", generalLimiter);
 
 // Stricter Rate Limiting for Auth/Login
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { success: false, message: "Too many login attempts, please try again in 15 minutes." } });
 app.use("/api/auth/login", authLimiter);
 app.use("/api/auth/admin/login", authLimiter);
+app.use("/api/auth/admin/setup", authLimiter);
+app.use("/api/auth/unlock-secret", authLimiter);
 
 require("./socket/liveSocket")(io);
 const matchController = require("./controllers/matchController");
 matchController.setSocket(io);
+require("./controllers/liveScoringController").setSocket(io);
 
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/admins", require("./routes/adminRoutes"));
@@ -279,7 +356,6 @@ app.use("/api/polls", require("./routes/pollRoutes"));
 app.use("/api/about-me", require("./routes/aboutMeRoutes"));
 app.use("/api/upload", require("./routes/uploadRoutes"));
 
-const path = require("path");
 const uploadsPath = path.join(__dirname, "public", "uploads");
 app.use("/uploads", express.static(uploadsPath));
 app.use("/uploads", (req, res) => {
@@ -291,11 +367,17 @@ app.use("/uploads", (req, res) => {
 });
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/api/health", (req, res) =>
-  res.json({ status: "ok", uptime: process.uptime(), time: new Date() })
-);
+app.get("/api/health", (req, res) => {
+  const database = mongoose.connection.readyState === 1 ? "connected" : "unavailable";
+  res.status(database === "connected" ? 200 : 503).json({
+    status: database === "connected" ? "ok" : "degraded",
+    database,
+    uptime: process.uptime(),
+    time: new Date()
+  });
+});
 
-app.get("/api/debug/cors", (req, res) => {
+if (process.env.NODE_ENV !== "production" && process.env.ENABLE_CORS_DEBUG === "true") app.get("/api/debug/cors", (req, res) => {
   const requestOrigin = req.headers.origin || null;
   const originAllowed = requestOrigin ? isOriginAllowed(requestOrigin) : false;
   res.json({
@@ -303,12 +385,7 @@ app.get("/api/debug/cors", (req, res) => {
     requestOrigin,
     originAllowed,
     allowAllOrigins,
-    allowedOrigins,
-    env: {
-      CLIENT_URL: process.env.CLIENT_URL || null,
-      ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || null,
-      NODE_ENV: process.env.NODE_ENV || null
-    }
+    allowedOrigins
   });
 });
 
@@ -317,15 +394,9 @@ app.use((req, res) =>
 );
 
 app.use((err, req, res, _next) => {
-  console.error("🔥 Error:", err.message, err.stack);
-  const fs = require("fs");
-  const log = `[${new Date().toISOString()}] ${req.method} ${req.url}\n${err.stack}\n\n`;
-  
-  try {
-    fs.appendFileSync(require("path").join(__dirname, "error.log"), log);
-  } catch (writeErr) {
-    console.error("Failed to write to error.log:", writeErr.message);
-  }
+  // Keep diagnostics in server logs without recording query strings, tokens,
+  // request bodies, or credentials. Production clients receive generic 5xx text.
+  console.error("🔥 Request error:", req.method, req.path, err.stack || err.message);
 
   // Mongoose validation error
   if (err.name === "ValidationError") {
@@ -334,23 +405,37 @@ app.use((err, req, res, _next) => {
 
   // Mongoose duplicate key error
   if (err.code === 11000) {
-    const field = Object.keys(err.keyPattern)[0];
+    const field = Object.keys(err.keyPattern || {})[0] || "unique field";
     return res.status(409).json({ success: false, message: `Duplicate entry for ${field}` });
   }
 
+  if (err.name === "MulterError") {
+    const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    return res.status(status).json({
+      success: false,
+      message: err.code === "LIMIT_FILE_SIZE" ? "Uploaded image exceeds the 5 MiB limit" : "Invalid upload request"
+    });
+  }
+
   // Database connection error
-  if (!dbConnected && err.message.includes("connection")) {
+  if (!dbConnected && String(err.message || "").includes("connection")) {
     return res.status(503).json({ success: false, message: "Database unavailable. Please try again later." });
   }
 
   // Default error
   const statusCode = err.status || err.statusCode || 500;
-  res.status(statusCode).json({ success: false, message: err.message || "Internal server error" });
+  const publicMessage = statusCode >= 500
+    ? "Internal server error"
+    : (err.message || "Request failed");
+  res.status(statusCode).json({ success: false, message: publicMessage });
 });
 
 /* ── GRACEFUL SHUTDOWN ──────────────────────────────── */
 const gracefulShutdown = async (signal) => {
   console.log(`\n⚠️  ${signal} received. Gracefully shutting down...`);
+  shuttingDown = true;
+  clearDatabaseReconnect();
+  clearInterval(memoryMonitor);
 
   try {
     const backupPath = runDatabaseBackup({ label: `shutdown-${signal.toLowerCase()}` });
@@ -391,7 +476,7 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 /* ── UNHANDLED ERROR HANDLERS ──────────────────────── */
 process.on("uncaughtException", (err) => {
-  console.error("❌ Uncaught Exception:", err);
+  console.error("❌ Uncaught Exception:", err?.stack || err?.message || "Unknown exception");
   try {
     const backupPath = runDatabaseBackup({ label: "uncaught-exception" });
     if (backupPath) {
@@ -400,16 +485,11 @@ process.on("uncaughtException", (err) => {
   } catch (backupErr) {
     console.error("⚠️  Failed to create crash backup after uncaught exception:", backupErr.message);
   }
-  const fs = require("fs");
-  fs.appendFileSync(
-    require("path").join(__dirname, "error.log"),
-    `[${new Date().toISOString()}] UNCAUGHT EXCEPTION\n${err.stack}\n\n`
-  );
   process.exit(1);
 });
 
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ Unhandled Rejection:", reason?.stack || reason?.message || String(reason));
   try {
     const backupPath = runDatabaseBackup({ label: "unhandled-rejection" });
     if (backupPath) {
@@ -418,28 +498,19 @@ process.on("unhandledRejection", (reason, promise) => {
   } catch (backupErr) {
     console.error("⚠️  Failed to create crash backup after unhandled rejection:", backupErr.message);
   }
-  const fs = require("fs");
-  fs.appendFileSync(
-    require("path").join(__dirname, "error.log"),
-    `[${new Date().toISOString()}] UNHANDLED REJECTION\n${reason}\n\n`
-  );
 });
 
 /* ── MEMORY MONITORING ──────────────────────────────── */
-setInterval(() => {
+const memoryMonitor = setInterval(() => {
   const usage = process.memoryUsage();
-  const heapUsedPercent = (usage.heapUsed / usage.heapTotal) * 100;
+  const configuredLimitMb = Math.max(128, Number(process.env.MEMORY_WARNING_LIMIT_MB) || 512);
+  const rssMb = usage.rss / 1024 / 1024;
   
-  if (heapUsedPercent > 85) {
-    console.warn(`⚠️  High memory usage: ${heapUsedPercent.toFixed(2)}% (${Math.round(usage.heapUsed / 1024 / 1024)}MB)`);
-  }
-
-  // Force garbage collection if available (requires --expose-gc flag)
-  if (global.gc && heapUsedPercent > 90) {
-    console.log("🗑️  Forcing garbage collection...");
-    global.gc();
+  if (rssMb > configuredLimitMb) {
+    console.warn(`⚠️  High process memory: ${rssMb.toFixed(0)}MB RSS (warning threshold ${configuredLimitMb}MB)`);
   }
 }, 60000); // Check every minute
+memoryMonitor.unref();
 
 const startServer = async () => {
   // Initialize DB in background but don't block server start permanently

@@ -1,5 +1,5 @@
 // src/components/common/AutocompleteInput.jsx
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 
 /**
  * AutocompleteInput
@@ -39,6 +39,8 @@ export default function AutocompleteInput({
   const [searched,    setSearched]    = useState(false); // true once at least one search ran
   const timerRef  = useRef(null);
   const wrapRef   = useRef(null);
+  const fetchFnRef = useRef(fetchFn);
+  fetchFnRef.current = fetchFn;
 
   // Close on outside click
   useEffect(() => {
@@ -54,33 +56,42 @@ export default function AutocompleteInput({
 
   // Debounced fetch
   useEffect(() => {
-    if (!value || value.length < minChars) {
+    let cancelled = false;
+    if (disabled || !value || value.length < minChars) {
       setSuggestions([]);
       setOpen(false);
       setSearched(false);
-      return;
+      setLoading(false);
+      return () => { cancelled = true; };
     }
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(async () => {
+      if (cancelled) return;
       setLoading(true);
       try {
-        const results = await fetchFn(value);
+        const results = await fetchFnRef.current(value);
+        if (cancelled) return;
         setSuggestions(results || []);
         setSearched(true);
         setOpen(true);           // always open after a search so user sees feedback
         setHighlighted(-1);
       } catch {
+        if (cancelled) return;
         setSuggestions([]);
         setSearched(true);
         setOpen(true);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }, debounce);
-    return () => clearTimeout(timerRef.current);
-  }, [value]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timerRef.current);
+    };
+  }, [debounce, disabled, minChars, value]);
 
   const pick = (item) => {
+    if (disabled) return;
     onChange(getLabel(item));
     onSelect?.(item);
     setSuggestions([]);
@@ -161,7 +172,7 @@ export default function AutocompleteInput({
           </div>
         )}
         {/* Clear button */}
-        {value && !loading && (
+        {value && !loading && !disabled && (
           <button
             type="button"
             onMouseDown={e => { e.preventDefault(); onChange(""); setSuggestions([]); setOpen(false); }}
@@ -187,7 +198,7 @@ export default function AutocompleteInput({
                 <span className="text-[9px] text-gray-700">↑↓ navigate · Enter select · Esc close</span>
               </div>
               {suggestions.map((item, idx) => (
-                <div key={item._id || item.name || idx} onMouseDown={() => pick(item)}>
+                <div key={item._id || item.name || idx} onMouseDown={() => { if (!disabled) pick(item); }}>
                   {renderItem
                     ? renderItem(item, idx === highlighted)
                     : defaultRender(item, idx === highlighted)}

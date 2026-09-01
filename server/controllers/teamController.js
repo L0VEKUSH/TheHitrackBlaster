@@ -1,12 +1,19 @@
 // server/controllers/teamController.js
 const { Team } = require("../models/other");
 const Match = require("../models/Match");
+const { escapeRegExp, pick, validationStatus } = require("../utils/input");
+
+const WRITABLE_FIELDS = [
+  "name", "shortName", "flag", "logo", "teamType", "coach", "captain",
+  "homeGround", "founded", "description", "players", "rankings", "otherSportRankings",
+];
 
 const getTeamRankings = async ({ format = "T20I", limit = 20 }) => {
   const query = { status: "completed" };
   if (format) query.format = format.toUpperCase();
-  const matches = await Match.find(query).lean();
-  console.log(`[RANKINGS] Found ${matches.length} completed matches for format=${format}, query=${JSON.stringify(query)}`);
+  const matches = await Match.find(query)
+    .select("teamA teamB innings1.battingTeam innings1.runs innings2.battingTeam innings2.runs")
+    .lean();
   const agg = {};
 
   const ensure = (name) => {
@@ -59,7 +66,8 @@ const getTeamRankings = async ({ format = "T20I", limit = 20 }) => {
   }));
 
   teams.sort((x, y) => y.points - x.points || y.wins - x.wins || y.netRuns - x.netRuns || y.runsFor - x.runsFor);
-  const top = teams.slice(0, Number(limit));
+  const safeLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 20));
+  const top = teams.slice(0, safeLimit);
   const names = top.map(t => t.name);
   const details = await Team.find({ name: { $in: names } }).lean();
   const map = new Map(details.map(d => [d.name, d]));
@@ -83,8 +91,8 @@ exports.getTeams = async (req, res) => {
     const { teamType, search } = req.query;
     const query = {};
     if (teamType) query.teamType = teamType;
-    if (search)   query.name    = new RegExp(search, "i");
-    const teams = await Team.find(query).sort({ name: 1 }).lean();
+    if (search) query.name = new RegExp(escapeRegExp(String(search).slice(0, 100)), "i");
+    const teams = await Team.find(query).sort({ name: 1 }).limit(250).lean();
     res.json({ success: true, teams });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -101,22 +109,33 @@ exports.getTeam = async (req, res) => {
 
 exports.createTeam = async (req, res) => {
   try {
-    const team = await Team.create(req.body);
+    const team = await Team.create(pick(req.body, WRITABLE_FIELDS));
     res.status(201).json({ success: true, team });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+  } catch (err) {
+    const status = validationStatus(err);
+    res.status(status).json({ success: false, message: status === 500 ? "Unable to create team" : err.message });
+  }
 };
 
 exports.updateTeam = async (req, res) => {
   try {
-    const team = await Team.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const team = await Team.findByIdAndUpdate(
+      req.params.id,
+      pick(req.body, WRITABLE_FIELDS),
+      { new: true, runValidators: true, context: "query" },
+    );
     if (!team) return res.status(404).json({ success: false, message: "Not found" });
     res.json({ success: true, team });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+  } catch (err) {
+    const status = validationStatus(err);
+    res.status(status).json({ success: false, message: status === 500 ? "Unable to update team" : err.message });
+  }
 };
 
 exports.deleteTeam = async (req, res) => {
   try {
-    await Team.findByIdAndDelete(req.params.id);
+    const team = await Team.findByIdAndDelete(req.params.id);
+    if (!team) return res.status(404).json({ success: false, message: "Not found" });
     res.json({ success: true, message: "Deleted" });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

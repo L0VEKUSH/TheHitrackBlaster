@@ -14,7 +14,9 @@ exports.getLivePredictions = async (match) => {
   const teamAName = match.teamA || match.teamAShort || "Team A";
   const teamBName = match.teamB || match.teamBShort || "Team B";
   const innNum = match.currentInnings || 1;
-  const inn = innNum === 1 ? match.innings1 : match.innings2;
+  const inn = match.isSuperOver
+    ? (innNum === 1 ? match.superOverInnings1 : match.superOverInnings2)
+    : (innNum === 1 ? match.innings1 : match.innings2);
   const battingTeamName = (inn?.battingTeam && inn.battingTeam.trim()) || (innNum === 2 ? teamBName : teamAName);
   const bowlingTeamName = battingTeamName === teamAName ? teamBName : teamAName;
   
@@ -26,14 +28,14 @@ exports.getLivePredictions = async (match) => {
   };
 
   const currentStriker = (inn.batsmen || []).find(b => b.isStriker)?.name || "The batsman";
-  const currentBowler = match.currentBowler || "the bowler";
+  const currentBowler = inn.currentBowler || match.currentBowler || "the bowler";
   const scoreStr = `${inn.runs}/${inn.wickets} (${Math.floor(inn.balls / 6)}.${inn.balls % 6} ov)`;
 
   const lastBalls = (inn.commentary || []).slice(0, 6);
   const overAnalysis = analyzeOverMomentum({ balls: lastBalls });
 
   const targetValue = match.isSuperOver && innNum === 2 ? (match.superOverInnings1.runs + 1) : match.target;
-  const remainingBalls = Math.max(0, (match.overs || 20) * 6 - inn.balls);
+  const remainingBalls = Math.max(0, (match.isSuperOver ? 6 : (match.overs || 20) * 6) - inn.balls);
   const requiredRate = innNum === 2 && targetValue && remainingBalls > 0
     ? (targetValue - inn.runs) / (remainingBalls / 6)
     : null;

@@ -2,18 +2,11 @@
 import { Link } from "react-router-dom";
 import { StatusBadge, FormatBadge } from "../common/Spinner";
 import dayjs from "dayjs";
-
-function getScore(innings) {
-  if (!innings) return null;
-  const overs = innings.balls
-    ? `${Math.floor(innings.balls / 6)}.${innings.balls % 6}`
-    : "0.0";
-  return `${innings.runs}/${innings.wickets} (${overs})`;
-}
+import { formatInningsScore, getTeamScore } from "../../utils/matchSelectors";
 
 export default function MatchCard({ match }) {
-  const inn1 = match.innings1;
-  const inn2 = match.innings2;
+  const teamAScore = getTeamScore(match, "teamA");
+  const teamBScore = getTeamScore(match, "teamB");
 
   return (
     <Link to={`/matches/${match._id}`}
@@ -53,9 +46,9 @@ export default function MatchCard({ match }) {
             </span>
           </div>
           <span className="font-black text-white text-lg tracking-tighter">
-            {inn1?.battingTeam === match.teamA || (!inn2 && inn1)
-              ? getScore(inn1) ?? "—"
-              : getScore(inn2) ?? (inn1 ? getScore(inn1) : "—")}
+            {teamAScore
+              ? formatInningsScore(teamAScore)
+              : <span className="text-[10px] font-bold text-gray-600 uppercase tracking-widest">Yet to bat</span>}
           </span>
         </div>
 
@@ -73,10 +66,8 @@ export default function MatchCard({ match }) {
             </span>
           </div>
           <span className="font-black text-white text-lg tracking-tighter">
-            {inn2?.battingTeam === match.teamB || (inn1?.battingTeam === match.teamB)
-              ? getScore(
-                  inn1?.battingTeam === match.teamB ? inn1 : inn2
-                ) ?? "—"
+            {teamBScore
+              ? formatInningsScore(teamBScore)
               : <span className="text-[10px] font-bold text-gray-600 uppercase tracking-widest">Yet to bat</span>}
           </span>
         </div>

@@ -20,6 +20,7 @@ yarn-debug.log*
 yarn-error.log*
 server/logs/
 *.log
+server/backups/
 
 # OS metadata
 .DS_Store

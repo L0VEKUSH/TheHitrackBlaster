@@ -1,11 +1,10 @@
-# TODO
+# Live scoring checklist
 
-- [x] Inspect `server/middleware/validation.js` scoring middleware contract
-- [x] Update `validateScoreUpdate` to accept frontend payload shape (inningsNum/runs/isWicket/extraType/etc) while keeping backward compatibility for `{action,data}`
-- [x] Ensure extraType naming compatibility (frontend: `noBall`, `legBye`; middleware: `no-ball`, `leg-bye`)
-
-- [x] Add safe normalization and clearer 400 messages
-- [ ] Re-run build/tests (server/client) and verify `POST /api/matches/:id/score` no longer returns 400 "Action required"
+- [x] Route the admin flat score payload through the authoritative scoring controller and engine
+- [x] Normalize legacy extra names (`no-ball`, `leg-bye`) at the scoring boundary
+- [x] Require idempotency keys and optimistic match versions for every scoring mutation
+- [x] Return specific validation errors for invalid cricket actions
+- [x] Run server/client tests and verify the authenticated `POST /api/matches/:id/score` flat payload no longer returns 400 "Action required"
 
 
 

@@ -10,21 +10,41 @@ export default function MatchAIWidgets({ matchId }) {
   const [leaderboard, setLeaderboard] = useState([]);
 
   useEffect(() => {
+    if (!matchId) return undefined;
+    let active = true;
+    let inFlight = false;
+    const controllers = new Set();
+
     const fetchData = async () => {
+      if (!active || inFlight) return;
+      inFlight = true;
+      const controller = new AbortController();
+      controllers.add(controller);
       try {
         const [aiRes, pollRes, lbRes] = await Promise.all([
-          matchAPI.getAIPredictions(matchId),
-          pollAPI.getMatchPolls(matchId),
-          pollAPI.getLeaderboard()
+          matchAPI.getAIPredictions(matchId, { signal: controller.signal }),
+          pollAPI.getMatchPolls(matchId, undefined, { signal: controller.signal }),
+          pollAPI.getLeaderboard({ signal: controller.signal })
         ]);
-        setPredictions(aiRes.data.data);
-        setPolls(pollRes.data.data);
-        setLeaderboard(lbRes.data.data.slice(0, 5));
-      } catch (err) { console.error("AI Error:", err); }
+        if (!active) return;
+        setPredictions(aiRes.data.data || null);
+        setPolls(Array.isArray(pollRes.data.data) ? pollRes.data.data : []);
+        setLeaderboard(Array.isArray(lbRes.data.data) ? lbRes.data.data.slice(0, 5) : []);
+      } catch (err) {
+        if (active && err.code !== "ERR_CANCELED") console.error("AI Error:", err);
+      } finally {
+        controllers.delete(controller);
+        inFlight = false;
+      }
     };
-    fetchData();
-    const interval = setInterval(fetchData, 30000); // Update every 30s
-    return () => clearInterval(interval);
+    void fetchData();
+    const interval = window.setInterval(() => { void fetchData(); }, 30000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      controllers.forEach((controller) => controller.abort());
+      controllers.clear();
+    };
   }, [matchId]);
 
   const handleVote = async (pollId, optionId) => {

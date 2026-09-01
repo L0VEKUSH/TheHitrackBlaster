@@ -14,7 +14,7 @@ const baselineRPO = (overs) => {
   return 9.5;
 };
 
-const firstInningsProbability = ({ runs, wickets, ballsBowled, overs }) => {
+const firstInningsProbability = ({ runs, wickets, ballsBowled, overs, maxWickets = 10 }) => {
   const totalBalls = overs * 6;
   if (ballsBowled <= 0) return 50;
 
@@ -25,7 +25,7 @@ const firstInningsProbability = ({ runs, wickets, ballsBowled, overs }) => {
 
   let probability = 50 + scoreDelta * 34;
 
-  const wicketPressure = (wickets / 10) * 18;
+  const wicketPressure = (wickets / maxWickets) * 18;
   probability -= wicketPressure;
 
   if (ballsBowled <= 18) {
@@ -38,22 +38,22 @@ const firstInningsProbability = ({ runs, wickets, ballsBowled, overs }) => {
   }
 
   if (wickets <= 2) probability += 8;
-  if (wickets >= 8) probability -= 10;
+  if (wickets >= Math.max(1, maxWickets - 2)) probability -= 10;
 
   return roundProbability(probability);
 };
 
-const secondInningsProbability = ({ runs, wickets, ballsBowled, overs, target }) => {
+const secondInningsProbability = ({ runs, wickets, ballsBowled, overs, target, maxWickets = 10 }) => {
   const totalBalls = overs * 6;
   const ballsRemaining = totalBalls - ballsBowled;
   const runsRequired = target - runs;
 
   if (runsRequired <= 0) return 99;
-  if (ballsRemaining <= 0 || wickets >= 10) return 1;
+  if (ballsRemaining <= 0 || wickets >= maxWickets) return 1;
 
   const currentRR = ballsBowled > 0 ? runs * 6 / ballsBowled : 0;
   const requiredRR = runsRequired * 6 / ballsRemaining;
-  const wicketsRemaining = Math.max(0, 10 - wickets);
+  const wicketsRemaining = Math.max(0, maxWickets - wickets);
 
   let probability = 50;
   probability += (currentRR - requiredRR) * 8;
@@ -80,8 +80,8 @@ const secondInningsProbability = ({ runs, wickets, ballsBowled, overs, target })
 exports.calculateWinProbability = (match) => {
   if (!match || (match.status !== "live" && match.status !== "upcoming")) {
     if (match.status === "completed") {
-      const i1 = match.innings1?.runs || 0;
-      const i2 = match.innings2?.runs || 0;
+      const i1 = (match.isSuperOver ? match.superOverInnings1 : match.innings1)?.runs || 0;
+      const i2 = (match.isSuperOver ? match.superOverInnings2 : match.innings2)?.runs || 0;
       if (i2 > i1) return { battingTeam: 99, bowlingTeam: 1 };
       if (i1 > i2) return { battingTeam: 1, bowlingTeam: 99 };
       return { battingTeam: 50, bowlingTeam: 50 };
@@ -90,10 +90,13 @@ exports.calculateWinProbability = (match) => {
   }
 
   const inningsNum = match.currentInnings || 1;
-  const inn = inningsNum === 1 ? match.innings1 : match.innings2;
+  const inn = match.isSuperOver
+    ? (inningsNum === 1 ? match.superOverInnings1 : match.superOverInnings2)
+    : (inningsNum === 1 ? match.innings1 : match.innings2);
   if (!inn) return { battingTeam: 50, bowlingTeam: 50 };
 
-  const overs = match.overs || 20;
+  const overs = match.isSuperOver ? 1 : (match.overs || 20);
+  const maxWickets = match.isSuperOver ? 2 : 10;
   const target = match.target || 0;
   const isSecondInnings = inningsNum === 2;
   const runs = inn.runs || 0;
@@ -101,8 +104,8 @@ exports.calculateWinProbability = (match) => {
   const ballsBowled = inn.balls || 0;
 
   const battingTeam = isSecondInnings
-    ? secondInningsProbability({ runs, wickets, ballsBowled, overs, target })
-    : firstInningsProbability({ runs, wickets, ballsBowled, overs });
+    ? secondInningsProbability({ runs, wickets, ballsBowled, overs, target, maxWickets })
+    : firstInningsProbability({ runs, wickets, ballsBowled, overs, maxWickets });
 
   return {
     battingTeam,

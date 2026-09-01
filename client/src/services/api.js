@@ -18,7 +18,15 @@ const rawApiUrl = import.meta.env.VITE_API_URL || "";
 const API_URL = rawApiUrl.trim().replace(/\/+$|\/$/g, "").replace(/\/api$/i, "");
 let baseURL = API_URL ? `${API_URL}/api` : "/api";
 baseURL = normalizeApiUrl(baseURL);
-const api = axios.create({ baseURL });
+const configuredTimeout = Number(import.meta.env.VITE_API_TIMEOUT_MS);
+const api = axios.create({
+  baseURL,
+  // Never leave a scoring control locked forever when a proxy or network drops
+  // the response. Individual callers can still override this when necessary.
+  timeout: Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : 15000,
+});
 
 // If you use cookies for auth, enable credentials; otherwise keep it false.
 // Uncomment the following line if backend uses cookie-based auth:
@@ -31,6 +39,12 @@ api.interceptors.request.use((config) => {
 
   if (config && typeof config.url === "string") {
     config.url = normalizeApiUrl(config.url);
+  }
+  if (config.data && typeof config.data === "object") {
+    if (config.data.actionId) config.headers["Idempotency-Key"] = config.data.actionId;
+    if (Number.isInteger(Number(config.data.expectedVersion))) {
+      config.headers["If-Match-Version"] = String(config.data.expectedVersion);
+    }
   }
 
   return config;
@@ -52,31 +66,32 @@ export default api;
 
 // ── Matches ─────────────────────────────────────────────────
 export const matchAPI = {
-  getAll:        (params)       => api.get("/matches", { params }),
+  getAll:        (params, config = {}) => api.get("/matches", { ...config, params }),
   getLive:       ()             => api.get("/matches/live/all"),
-  getById:       (id)           => api.get(`/matches/${id}`),
+  getById:       (id, config)   => api.get(`/matches/${id}`, config),
   create:        (data)         => api.post("/matches", data),
   update:        (id, data)     => api.put(`/matches/${id}`, data),
   remove:        (id)           => api.delete(`/matches/${id}`),
   setToss:       (id, data)     => api.post(`/matches/${id}/toss`, data),
-  getAIPredictions: (id)        => api.get(`/matches/${id}/ai-predictions`),
+  getAIPredictions: (id, config = {}) => api.get(`/matches/${id}/ai-predictions`, config),
   updateScore:   (id, data)     => api.post(`/matches/${id}/score`, data),
   addBatsman:    (id, num, data)=> api.post(`/matches/${id}/innings/${num}/batsman`, data),
   addBowler:     (id, num, data)=> api.post(`/matches/${id}/innings/${num}/bowler`, data),
   addCommentary: (id, data)     => api.post(`/matches/${id}/commentary`, data),
-  undo:          (id)           => api.post(`/matches/${id}/undo`),
+  undo:          (id, data = {})=> api.post(`/matches/${id}/undo`, data),
+  redo:          (id, data = {})=> api.post(`/matches/${id}/redo`, data),
   setStatus:     (id, data)     => api.put(`/matches/${id}/status`, data),
-  startSuperOver:(id)           => api.post(`/matches/${id}/super-over`),
-  declareInnings:(id)           => api.post(`/matches/${id}/declare`),
+  startSuperOver:(id, data = {})=> api.post(`/matches/${id}/super-over`, data),
+  declareInnings:(id, data = {})=> api.post(`/matches/${id}/declare`, data),
   setManOfTheMatch: (id, data) => api.put(`/matches/${id}/man-of-match`, data),
 };
 
 export const pollAPI = {
-  getMatchPolls: (matchId, params) => api.get(`/polls/match/${matchId}`, { params }),
+  getMatchPolls: (matchId, params, config = {}) => api.get(`/polls/match/${matchId}`, { ...config, params }),
   create:        (data)    => api.post("/polls", data),
   vote:          (data)    => api.post("/polls/vote", data),
   resolve:       (pollId, correctOptionId) => api.post(`/polls/${pollId}/resolve`, { correctOptionId }),
-  getLeaderboard: ()       => api.get("/polls/leaderboard")
+  getLeaderboard: (config = {}) => api.get("/polls/leaderboard", config)
 };
 
 // ── Players ─────────────────────────────────────────────────

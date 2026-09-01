@@ -45,7 +45,9 @@ const upload = multer({
     if (mimetype && extname) {
       return cb(null, true);
     }
-    cb(new Error("Only images (jpeg, jpg, png, webp) are allowed"));
+    const error = new Error("Only images (jpeg, jpg, png, webp) are allowed");
+    error.statusCode = 415;
+    cb(error);
   }
 });
 
