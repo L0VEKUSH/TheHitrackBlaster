@@ -59,7 +59,7 @@ const migrateMatch = (match) => {
     }
   }
 
-  if (match.schemaVersion !== 2) {
+  if (Number(match.schemaVersion || 0) < 2) {
     match.schemaVersion = 2;
     changed = true;
   }

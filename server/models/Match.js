@@ -23,11 +23,21 @@ const commentarySchema = new mongoose.Schema({
   fielderName:String,
   batterName:String,
   bowlerName:String,
+  batterId: { type: String, default: "" },
+  batterNameSnapshot: { type: String, default: "" },
+  bowlerId: { type: String, default: "" },
+  bowlerNameSnapshot: { type: String, default: "" },
+  outPlayerId: { type: String, default: "" },
+  outPlayerNameSnapshot: { type: String, default: "" },
+  fielderId: { type: String, default: "" },
+  fielderNameSnapshot: { type: String, default: "" },
+  isFreeHit: { type: Boolean, default: false },
   addedAt:  { type: Date, default: Date.now }
 }, { _id: false });
 
 const batsmanSchema = new mongoose.Schema({
   name:      { type: String, required: true },
+  nameSnapshot: { type: String, default: "" },
   playerId:  { type: String, default: "" },
   runs:      nonNegativeIntegerField({ default: 0 }),
   balls:     nonNegativeIntegerField({ default: 0 }),
@@ -41,6 +51,7 @@ const batsmanSchema = new mongoose.Schema({
 
 const bowlerSchema = new mongoose.Schema({
   name:    { type: String, required: true },
+  nameSnapshot: { type: String, default: "" },
   playerId:{ type: String, default: "" },
   balls:   nonNegativeIntegerField({ default: 0 }),
   maidens: nonNegativeIntegerField({ default: 0 }),
@@ -57,13 +68,17 @@ const scoringEventSchema = new mongoose.Schema({
   inningsNumber: { type: Number, enum: [1, 2], required: true },
   playerName: { type: String, default: "" },
   playerId: { type: String, default: "" },
+  nameSnapshot: { type: String, default: "" },
   isStriker: Boolean,
   batterName: { type: String, default: "" },
   batterId: { type: String, default: "" },
+  batterNameSnapshot: { type: String, default: "" },
   nonStrikerName: { type: String, default: "" },
   nonStrikerId: { type: String, default: "" },
+  nonStrikerNameSnapshot: { type: String, default: "" },
   bowlerName: { type: String, default: "" },
   bowlerId: { type: String, default: "" },
+  bowlerNameSnapshot: { type: String, default: "" },
   batsmanRuns: nonNegativeIntegerField({ default: 0 }),
   extraRuns: nonNegativeIntegerField({ default: 0 }),
   extraType: { type: String, enum: ["", "wide", "noBall", "bye", "legBye", "penalty", "bonus"], default: "" },
@@ -75,8 +90,11 @@ const scoringEventSchema = new mongoose.Schema({
   wicketType: { type: String, default: "" },
   outPlayerName: { type: String, default: "" },
   outPlayerId: { type: String, default: "" },
+  outPlayerNameSnapshot: { type: String, default: "" },
   fielderName: { type: String, default: "" },
   fielderId: { type: String, default: "" },
+  fielderNameSnapshot: { type: String, default: "" },
+  isFreeHit: Boolean,
   commentary: { type: String, maxlength: 1000, default: "" },
   symbol: { type: String, maxlength: 16, default: "" },
   reason: { type: String, maxlength: 100, default: "" },
@@ -109,33 +127,44 @@ const inningsSchema = new mongoose.Schema({
     score: String,
     over:  String,
     player:String,
+    playerId: { type: String, default: "" },
+    nameSnapshot: { type: String, default: "" },
     wicketNum: nonNegativeIntegerField(),
     eventId: { type: String, default: "" }
   }],
   partnerships: [{
     players: [String],
+    playerIds: [String],
+    nameSnapshots: [String],
     runs:    nonNegativeIntegerField({ default: 0 }),
     balls:   nonNegativeIntegerField({ default: 0 }),
     isClosed:{ type: Boolean, default: false }
   }],
   lastOverBowler: { type: String, default: "" },
+  lastOverBowlerId: { type: String, default: "" },
   currentBowler: { type: String, default: "" },
+  currentBowlerId: { type: String, default: "" },
   currentOverStarted: { type: Boolean, default: false },
   overHistory: [{
     over: nonNegativeIntegerField(),
     runs: nonNegativeIntegerField({ default: 0 }),
     wickets: nonNegativeIntegerField({ default: 0 }),
     extras: nonNegativeIntegerField({ default: 0 }),
-    bowlerName: { type: String, default: "" }
+    bowlerName: { type: String, default: "" },
+    bowlerId: { type: String, default: "" },
+    bowlerNameSnapshot: { type: String, default: "" }
   }],
   milestones: [{
     player: { type: String, required: true },
+    playerId: { type: String, default: "" },
+    nameSnapshot: { type: String, default: "" },
     type: { type: String, required: true }, // '50', '100', '3W', '5W'
     over: { type: String, required: true },
     score: { type: String, required: true },
     createdAt: { type: Date, default: Date.now }
   }],
   recentBalls: [String],
+  freeHitPending: { type: Boolean, default: false },
   events: { type: [scoringEventSchema], default: [] },
   // A one-time immutable projection for legacy matches that pre-date event history.
   // Replay can safely undo back to this boundary without rewriting old score data.
@@ -146,6 +175,26 @@ const inningsSchema = new mongoose.Schema({
   rulesVersion: nonNegativeIntegerField({ min: 1, default: 1 }),
   isDone:      { type: Boolean, default: false },
   endReason:   { type: String, default: "" }
+}, { _id: false });
+
+const matchParticipantSchema = new mongoose.Schema({
+  playerId: { type: String, required: true },
+  nameSnapshot: { type: String, required: true, trim: true, maxlength: 120 },
+}, { _id: false });
+
+// `Mixed` members keep the expand/migrate phase safe for any Phase-1 records
+// that already contain legacy strings. The Playing-XI endpoint only writes the
+// canonical `{ playerId, nameSnapshot }` shape.
+const playingXIConfigSchema = new mongoose.Schema({
+  playingXI: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  substitutes: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  captainId: { type: String, default: "" },
+  captainName: { type: String, default: "" },
+  captainNameSnapshot: { type: String, default: "" },
+  wicketKeeperId: { type: String, default: "" },
+  wicketKeeperName: { type: String, default: "" },
+  wicketKeeperNameSnapshot: { type: String, default: "" },
+  selectedAt: { type: Date, default: null },
 }, { _id: false });
 
 const matchSchema = new mongoose.Schema({
@@ -168,6 +217,20 @@ const matchSchema = new mongoose.Schema({
   status:         { type: String, enum: ["upcoming","live","completed"], default: "upcoming" },
   phase:          { type: String, enum: ["upcoming", "firstInnings", "inningsBreak", "secondInnings", "finished", "noResult"], default: "upcoming" },
   result:         { type: String, default: "" },
+  resultData: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+    // Structured result information (replaces English text parsing)
+    // Example: {
+    //   type: "win" | "tie" | "no-result" | "abandoned" | "draw",
+    //   winnerTeamId: ObjectId,
+    //   winnerTeamNameSnapshot: "Panthers",
+    //   marginType: "runs" | "wickets" | "innings" | "super-over",
+    //   marginValue: 6,
+    //   method: "normal" | "super-over" | "DLS",
+    //   decidedAt: Date
+    // }
+  },
   tossWinner:     { type: String, default: "" },
   tossDecision:   { type: String, enum: ["bat","bowl",""], default: "" },
   currentInnings: { type: Number, enum: [1, 2], default: 1 },
@@ -183,7 +246,9 @@ const matchSchema = new mongoose.Schema({
 
   recentBalls:    [String],
   currentBatsmen: [String],
+  currentBatsmenIds: [String],
   currentBowler:  { type: String, default: "" },
+  currentBowlerId:{ type: String, default: "" },
 
   eventSequence:  nonNegativeIntegerField({ default: 0 }),
   processedActions: [{
@@ -194,10 +259,16 @@ const matchSchema = new mongoose.Schema({
     processedAt: { type: Date, default: Date.now }
   }],
   redoStack: { type: [mongoose.Schema.Types.Mixed], default: [] },
-  schemaVersion: nonNegativeIntegerField({ min: 1, default: 2 }),
+  schemaVersion: nonNegativeIntegerField({ min: 1, default: 3 }),
 
   squadA:         [String],   // selected player names for teamA
   squadB:         [String],   // selected player names for teamB
+  teamAParticipants: { type: [matchParticipantSchema], default: [] },
+  teamBParticipants: { type: [matchParticipantSchema], default: [] },
+
+  // Playing XI with detailed roster structure (replaces simple squad lists)
+  teamAPlayingXI: { type: playingXIConfigSchema, default: null },
+  teamBPlayingXI: { type: playingXIConfigSchema, default: null },
 
   tournament:     { type: mongoose.Schema.Types.ObjectId, ref: "Tournament" },
   videoUrl:       { type: String, default: "" },

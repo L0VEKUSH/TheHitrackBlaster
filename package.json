@@ -11,7 +11,9 @@
     "install-all": "npm install && npm --prefix server install && npm --prefix client install",
     "backup:db": "node server/scripts/backupDatabase.js",
     "restore:db": "node server/scripts/restoreDatabase.js",
-    "migrate:scoring": "node server/scripts/migrateScoringEvents.js"
+    "migrate:scoring": "node server/scripts/migrateScoringEvents.js",
+    "migrate:playing-xi": "node server/scripts/migratePlayingXI.js",
+    "migrate:player-identity": "node server/scripts/migratePlayerIdentity.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.500.0",

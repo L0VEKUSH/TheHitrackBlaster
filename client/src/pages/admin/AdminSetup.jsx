@@ -14,7 +14,7 @@ export default function AdminSetup() {
     e.preventDefault(); setError(""); setLoading(true);
     try {
       const { data } = await authAPI.adminSetup(form);
-      localStorage.setItem("cs_token", data.token);
+      localStorage.setItem("cs_admin_token", data.token);
       localStorage.setItem("cs_admin", JSON.stringify(data.admin));
       navigate("/admin");
     } catch (err) {

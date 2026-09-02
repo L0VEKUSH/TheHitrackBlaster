@@ -9,6 +9,80 @@ const WRITABLE_PLAYER_FIELDS = [
   "baseBatting", "baseBowling", "rankings",
 ];
 
+const normalizePlayerId = (value) => {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+};
+
+const normalizePlayerName = (value) => String(value || "").trim();
+const playerNameKey = (value) => normalizePlayerName(value).toLocaleLowerCase("en");
+
+const getNameSnapshot = (item) => {
+  if (typeof item === "string") return normalizePlayerName(item);
+  return normalizePlayerName(item?.nameSnapshot || item?.name || item?.playerName);
+};
+
+const getEmbeddedPlayerId = (item) => {
+  if (!item || typeof item === "string") return "";
+  return normalizePlayerId(item.playerId || item._id);
+};
+
+/**
+ * Build the authoritative lookup used by every statistics path. Names are
+ * deliberately mapped to arrays: a legacy name is safe only when exactly one
+ * Player document owns it.
+ */
+const createPlayerDirectory = (players = []) => {
+  const byId = new Map();
+  const byName = new Map();
+
+  for (const player of players) {
+    const playerId = normalizePlayerId(player?._id || player?.playerId);
+    if (!playerId) continue;
+    byId.set(playerId, player);
+
+    const nameKey = playerNameKey(player?.name);
+    if (!nameKey) continue;
+    const candidates = byName.get(nameKey) || [];
+    candidates.push(player);
+    byName.set(nameKey, candidates);
+  }
+
+  return { byId, byName };
+};
+
+/**
+ * Resolve an embedded match/statistics participant without guessing. A
+ * supplied playerId remains the identity even if its Player profile has since
+ * been removed. Name-only legacy rows resolve only to a unique Player name.
+ */
+const resolveEmbeddedPlayer = (item, directory) => {
+  const playerId = getEmbeddedPlayerId(item);
+  const suppliedSnapshot = getNameSnapshot(item);
+  if (playerId) {
+    const player = directory.byId.get(playerId) || null;
+    return {
+      playerId,
+      player,
+      nameSnapshot: suppliedSnapshot || normalizePlayerName(player?.name) || "Unknown",
+      legacy: false,
+    };
+  }
+
+  const nameKey = playerNameKey(suppliedSnapshot);
+  if (!nameKey) return null;
+  const candidates = directory.byName.get(nameKey) || [];
+  if (candidates.length !== 1) return null;
+
+  const player = candidates[0];
+  return {
+    playerId: normalizePlayerId(player._id || player.playerId),
+    player,
+    nameSnapshot: suppliedSnapshot || normalizePlayerName(player.name),
+    legacy: true,
+  };
+};
+
 const calculateMatchPoints = (p) => {
   const runs = p.runs || 0;
   const fours = p.fours || 0;
@@ -54,86 +128,133 @@ const getPlayersByNames = async (req, res) => {
 
 exports.getPlayersByNames = getPlayersByNames;
 
-const extractPlayerStatsFromMatch = (match) => {
-  const players = {};
-  const ensure = (name, id = null) => {
-    const normalizedName = name ? String(name).trim() : "";
-    const key = id ? String(id) : normalizedName;
-    if (!key) return null;
-    if (!players[key]) {
-      players[key] = {
-        name: normalizedName || "Unknown",
-        _id: id || null,
-        runs: 0,
-        balls: 0,
-        fours: 0,
-        sixes: 0,
-        wickets: 0,
-        ballsBowled: 0,
-        runsConceded: 0,
-        maidens: 0,
-        points: 0,
-      };
+const emptyRankedPlayer = (identity) => ({
+  playerId: identity.playerId,
+  _id: identity.playerId,
+  nameSnapshot: identity.nameSnapshot,
+  name: normalizePlayerName(identity.player?.name) || identity.nameSnapshot,
+  runs: 0,
+  balls: 0,
+  fours: 0,
+  sixes: 0,
+  wickets: 0,
+  ballsBowled: 0,
+  runsConceded: 0,
+  maidens: 0,
+  points: 0,
+});
+
+const extractPlayerStatsFromMatch = (match, directory) => {
+  const players = new Map();
+  const ensure = (item) => {
+    const identity = resolveEmbeddedPlayer(item, directory);
+    if (!identity?.playerId) return null;
+    if (!players.has(identity.playerId)) {
+      players.set(identity.playerId, emptyRankedPlayer(identity));
     }
-    return players[key];
+    const destination = players.get(identity.playerId);
+    if (!destination.nameSnapshot && identity.nameSnapshot) destination.nameSnapshot = identity.nameSnapshot;
+    return destination;
   };
 
-  const getPlayerKey = (item) => {
-    if (!item) return { name: null, id: null };
-    const id = item._id || item.playerId || null;
-    return { name: item.name, id };
-  };
+  const statisticsPlayers = Array.isArray(match?.statistics?.players)
+    ? match.statistics.players
+    : [];
+  // Match statistics are preferred only when every row has an unambiguous
+  // identity. If an old name-grouped statistics blob is ambiguous, rebuilding
+  // from innings rows can still recover identities already backfilled there.
+  const resolvedStatistics = statisticsPlayers.map((player) => ({
+    player,
+    identity: resolveEmbeddedPlayer(player, directory),
+  }));
+  const statisticsAreSafe = resolvedStatistics.length > 0 &&
+    resolvedStatistics.every(({ identity }) => Boolean(identity?.playerId));
 
-  if (match.statistics && Array.isArray(match.statistics.players) && match.statistics.players.length > 0) {
-    match.statistics.players.forEach((p) => {
-      const { name, id } = getPlayerKey(p);
-      if (!name && !id) return;
-      const dest = ensure(name, id);
-      if (!dest) return;
-      dest.runs += p.runs || 0;
-      dest.balls += p.balls || 0;
-      dest.fours += p.fours || 0;
-      dest.sixes += p.sixes || 0;
-      dest.wickets += p.wickets || 0;
-      dest.ballsBowled += p.ballsBowled || 0;
-      dest.runsConceded += p.runsConceded || 0;
-      dest.maidens += p.maidens || 0;
-      dest.points += typeof p.points === "number" ? p.points : calculateMatchPoints(p);
-    });
-    return Object.values(players);
+  if (statisticsAreSafe) {
+    for (const { player } of resolvedStatistics) {
+      const dest = ensure(player);
+      if (!dest) continue;
+      dest.runs += Number(player.runs || 0);
+      dest.balls += Number(player.balls || 0);
+      dest.fours += Number(player.fours || 0);
+      dest.sixes += Number(player.sixes || 0);
+      dest.wickets += Number(player.wickets || 0);
+      dest.ballsBowled += Number(player.ballsBowled || 0);
+      dest.runsConceded += Number(player.runsConceded || 0);
+      dest.maidens += Number(player.maidens || 0);
+      dest.points += typeof player.points === "number" ? player.points : calculateMatchPoints(player);
+    }
+    return [...players.values()];
   }
 
-  const ingestInnings = (inn) => {
-    if (!inn) return;
-    if (Array.isArray(inn.batsmen)) {
-      inn.batsmen.forEach((b) => {
-        const { name, id } = getPlayerKey(b);
-        if (!name && !id) return;
-        const dest = ensure(name, id);
-        if (!dest) return;
-        dest.runs += b.runs || 0;
-        dest.balls += b.balls || 0;
-        dest.fours += b.fours || 0;
-        dest.sixes += b.sixes || 0;
-      });
+  const ingestInnings = (innings) => {
+    if (!innings) return;
+    for (const batter of Array.isArray(innings.batsmen) ? innings.batsmen : []) {
+      const dest = ensure(batter);
+      if (!dest) continue;
+      dest.runs += Number(batter.runs || 0);
+      dest.balls += Number(batter.balls || 0);
+      dest.fours += Number(batter.fours || 0);
+      dest.sixes += Number(batter.sixes || 0);
     }
-    if (Array.isArray(inn.bowlers)) {
-      inn.bowlers.forEach((b) => {
-        const { name, id } = getPlayerKey(b);
-        if (!name && !id) return;
-        const dest = ensure(name, id);
-        if (!dest) return;
-        dest.wickets += b.wickets || 0;
-        dest.ballsBowled += b.balls || 0;
-        dest.runsConceded += b.runs || 0;
-        dest.maidens += b.maidens || 0;
-      });
+    for (const bowler of Array.isArray(innings.bowlers) ? innings.bowlers : []) {
+      const dest = ensure(bowler);
+      if (!dest) continue;
+      dest.wickets += Number(bowler.wickets || 0);
+      dest.ballsBowled += Number(bowler.balls || 0);
+      dest.runsConceded += Number(bowler.runs || 0);
+      dest.maidens += Number(bowler.maidens || 0);
     }
   };
 
-  ingestInnings(match.innings1);
-  ingestInnings(match.innings2);
-  return Object.values(players).map((p) => ({ ...p, points: calculateMatchPoints(p) }));
+  ingestInnings(match?.innings1);
+  ingestInnings(match?.innings2);
+  return [...players.values()].map((player) => ({
+    ...player,
+    points: calculateMatchPoints(player),
+  }));
+};
+
+const aggregatePointsFromMatches = (matches, directory) => {
+  const aggregate = new Map();
+
+  for (const match of matches) {
+    for (const player of extractPlayerStatsFromMatch(match, directory)) {
+      const playerId = normalizePlayerId(player.playerId || player._id);
+      if (!playerId) continue;
+      if (!aggregate.has(playerId)) {
+        aggregate.set(playerId, {
+          playerId,
+          _id: playerId,
+          nameSnapshot: player.nameSnapshot,
+          name: player.name || player.nameSnapshot,
+          matches: 0,
+          runs: 0,
+          balls: 0,
+          fours: 0,
+          sixes: 0,
+          wickets: 0,
+          ballsBowled: 0,
+          runsConceded: 0,
+          maidens: 0,
+          points: 0,
+        });
+      }
+      const dest = aggregate.get(playerId);
+      dest.matches += 1;
+      dest.runs += Number(player.runs || 0);
+      dest.balls += Number(player.balls || 0);
+      dest.fours += Number(player.fours || 0);
+      dest.sixes += Number(player.sixes || 0);
+      dest.wickets += Number(player.wickets || 0);
+      dest.ballsBowled += Number(player.ballsBowled || 0);
+      dest.runsConceded += Number(player.runsConceded || 0);
+      dest.maidens += Number(player.maidens || 0);
+      dest.points += Number(player.points || 0);
+    }
+  }
+
+  return [...aggregate.values()];
 };
 
 const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -149,41 +270,23 @@ const getPointsRankings = async ({ format = "T20", limit = 20, minMatches = 1 })
       query.format = new RegExp(`^${escapeRegExp(normalizedFormat)}$`, "i");
     }
   }
-  const matches = await Match.find(query).lean();
-  const agg = {};
+  const [matches, playerProfiles] = await Promise.all([
+    Match.find(query).lean(),
+    Player.find({}).select("name fullName team photo role").lean(),
+  ]);
+  const directory = createPlayerDirectory(playerProfiles);
 
-  matches.forEach((match) => {
-    const players = extractPlayerStatsFromMatch(match);
-    players.forEach((p) => {
-      if (!p || !p.name) return;
-      const name = p.name.trim();
-      if (!name) return;
-      const dest = agg[name] || { name, matches: 0, runs: 0, balls: 0, fours: 0, sixes: 0, wickets: 0, ballsBowled: 0, runsConceded: 0, maidens: 0, points: 0 };
-      // count this player's appearance in the current match
-      dest.matches += 1;
-      dest.runs += p.runs || 0;
-      dest.balls += p.balls || 0;
-      dest.fours += p.fours || 0;
-      dest.sixes += p.sixes || 0;
-      dest.wickets += p.wickets || 0;
-      dest.ballsBowled += p.ballsBowled || 0;
-      dest.runsConceded += p.runsConceded || 0;
-      dest.maidens += p.maidens || 0;
-      dest.points += p.points || 0;
-      agg[name] = dest;
-    });
-  });
-
-  const players = Object.values(agg).map((p) => {
+  const players = aggregatePointsFromMatches(matches, directory).map((p) => {
     const strikeRate = p.balls > 0 ? (p.runs / p.balls) * 100 : 0;
     const overs = p.ballsBowled / 6;
     const economy = p.ballsBowled > 0 ? p.runsConceded / overs : null;
-    const average = p.wickets > 0 ? p.runs / p.wickets : (p.runs || 0);
+    // Bowling average = runsConceded / wickets (NOT runs / wickets)
+    const bowlingAverage = p.wickets > 0 ? p.runsConceded / p.wickets : null;
     return {
       ...p,
       strikeRate: Math.round(strikeRate),
       economy: economy === null ? null : parseFloat(economy.toFixed(2)),
-      average: parseFloat(average.toFixed(2))
+      average: bowlingAverage === null ? null : parseFloat(bowlingAverage.toFixed(2))
     };
   });
 
@@ -193,23 +296,15 @@ const getPointsRankings = async ({ format = "T20", limit = 20, minMatches = 1 })
   const safeLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 20));
   const topPlayers = filtered.slice(0, safeLimit);
 
-  const ids = topPlayers.filter(p => p._id).map(p => p._id);
-  const names = topPlayers.filter(p => !p._id).map(p => p.name);
-  const details = await Player.find({
-    $or: [
-      ...(ids.length > 0 ? [{ _id: { $in: ids } }] : []),
-      ...(names.length > 0 ? [{ name: { $in: names } }] : [])
-    ]
-  }).lean();
-
-  const detailMap = new Map(details.map((p) => [p._id ? String(p._id) : p.name, p]));
-
   return topPlayers.map((p) => {
-    const detailKey = p._id ? String(p._id) : p.name;
-    const detail = detailMap.get(detailKey) || {};
+    const playerId = normalizePlayerId(p.playerId || p._id);
+    const detail = directory.byId.get(playerId) || {};
     return {
       ...p,
-      _id: detail._id || p._id || null,
+      playerId,
+      _id: detail._id || playerId,
+      nameSnapshot: p.nameSnapshot || normalizePlayerName(detail.name),
+      name: normalizePlayerName(detail.name) || p.nameSnapshot || p.name,
       team: detail.team || "",
       photo: detail.photo || ""
     };
@@ -244,29 +339,93 @@ exports.getPlayers = async (req, res) => {
   }
 };
 
+const legacyArrayParticipantQuery = (path, name) => ({
+  [path]: {
+    $elemMatch: {
+      playerId: { $in: ["", null] },
+      $or: [{ name }, { nameSnapshot: name }],
+    },
+  },
+});
+
+const buildPlayerMatchConditions = (playerId, name, allowLegacyName) => {
+  const conditions = [
+    { "innings1.batsmen.playerId": playerId },
+    { "innings1.bowlers.playerId": playerId },
+    { "innings2.batsmen.playerId": playerId },
+    { "innings2.bowlers.playerId": playerId },
+    { "statistics.players.playerId": playerId },
+    { "statistics.players._id": playerId },
+    { squadA: playerId },
+    { squadB: playerId },
+    { "squadA.playerId": playerId },
+    { "squadB.playerId": playerId },
+    { "teamAPlayingXI.playingXI": playerId },
+    { "teamBPlayingXI.playingXI": playerId },
+    { "teamAPlayingXI.playingXI.playerId": playerId },
+    { "teamBPlayingXI.playingXI.playerId": playerId },
+  ];
+
+  if (!allowLegacyName) return conditions;
+  conditions.push(
+    legacyArrayParticipantQuery("innings1.batsmen", name),
+    legacyArrayParticipantQuery("innings1.bowlers", name),
+    legacyArrayParticipantQuery("innings2.batsmen", name),
+    legacyArrayParticipantQuery("innings2.bowlers", name),
+    legacyArrayParticipantQuery("statistics.players", name),
+    { squadA: name },
+    { squadB: name },
+    { "teamAPlayingXI.playingXI": name },
+    { "teamBPlayingXI.playingXI": name },
+  );
+  return conditions;
+};
+
+const findPlayerParticipant = (items, playerId, legacyName, allowLegacyName) => {
+  if (!Array.isArray(items)) return null;
+  const byId = items.find((item) => getEmbeddedPlayerId(item) === playerId);
+  if (byId || !allowLegacyName) return byId || null;
+  const expectedName = playerNameKey(legacyName);
+  return items.find((item) => !getEmbeddedPlayerId(item) && playerNameKey(getNameSnapshot(item)) === expectedName) || null;
+};
+
 // GET /api/players/:id
 exports.getPlayer = async (req, res) => {
   try {
     const player = await Player.findById(req.params.id).lean();
     if (!player) return res.status(404).json({ success: false, message: "Player not found" });
 
-    // Count Man of the Match awards for this player
-    const manOfMatch = await Match.countDocuments({
-      "statistics.manOfTheMatch.name": player.name
-    });
+    const playerId = normalizePlayerId(player._id);
+    const exactName = normalizePlayerName(player.name);
+    const sameNamePlayers = await Player.find({
+      name: new RegExp(`^${escapeRegExp(exactName)}$`, "i"),
+    }).select("_id").lean();
+    const allowLegacyName = sameNamePlayers.length === 1 &&
+      normalizePlayerId(sameNamePlayers[0]._id) === playerId;
 
-    // Compute Tournament-Level Stats
-    const matches = await Match.find({ 
-      status: "completed", 
-      $or: [
-        { "innings1.batsmen.name": player.name },
-        { "innings1.bowlers.name": player.name },
-        { "innings2.batsmen.name": player.name },
-        { "innings2.bowlers.name": player.name },
-        { squadA: player.name },
-        { squadB: player.name }
-      ]
-    }).populate("tournament", "name").lean();
+    const manOfMatchConditions = [
+      { "statistics.manOfTheMatch.playerId": playerId },
+      { "statistics.manOfTheMatch._id": playerId },
+    ];
+    if (allowLegacyName) {
+      manOfMatchConditions.push({
+        $and: [
+          { "statistics.manOfTheMatch.playerId": { $in: ["", null] } },
+          { $or: [
+            { "statistics.manOfTheMatch.name": exactName },
+            { "statistics.manOfTheMatch.nameSnapshot": exactName },
+          ] },
+        ],
+      });
+    }
+
+    const [manOfMatch, matches] = await Promise.all([
+      Match.countDocuments({ $or: manOfMatchConditions }),
+      Match.find({
+        status: "completed",
+        $or: buildPlayerMatchConditions(playerId, exactName, allowLegacyName),
+      }).populate("tournament", "name").lean(),
+    ]);
 
     const batByTourney = {};
     const bwlByTourney = {};
@@ -292,7 +451,7 @@ exports.getPlayer = async (req, res) => {
 
       const processBat = (inn) => {
         if (!inn || !Array.isArray(inn.batsmen)) return;
-        const b = inn.batsmen.find(bat => bat.name === player.name);
+        const b = findPlayerParticipant(inn.batsmen, playerId, exactName, allowLegacyName);
         if (b) {
           const st = batByTourney[tName];
           st.innings++;
@@ -309,7 +468,7 @@ exports.getPlayer = async (req, res) => {
 
       const processBwl = (inn) => {
         if (!inn || !Array.isArray(inn.bowlers)) return;
-        const bw = inn.bowlers.find(bowl => bowl.name === player.name);
+        const bw = findPlayerParticipant(inn.bowlers, playerId, exactName, allowLegacyName);
         if (bw) {
           const st = bwlByTourney[tName];
           st.innings++;
@@ -339,7 +498,7 @@ exports.getPlayer = async (req, res) => {
     Object.values(batByTourney).forEach(bat => calcRates(bat, {}));
     Object.values(bwlByTourney).forEach(bowl => calcRates({innings:0,notOuts:0,runs:0,balls:0}, bowl));
 
-    res.json({ success: true, player: { ...player, manOfMatch, battingByTournament: batByTourney, bowlingByTournament: bwlByTourney } });
+    res.json({ success: true, player: { ...player, playerId, manOfMatch, battingByTournament: batByTourney, bowlingByTournament: bwlByTourney } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -427,6 +586,7 @@ exports.rebuildAllPlayerStats = async () => {
     const matches = await Match.find({ status: "completed" }).lean();
 
     const playerStatsMap = {};
+    const playerDirectory = createPlayerDirectory(players);
     const normalizeFormat = (fmt) => {
       const value = String(fmt || "").trim().toUpperCase();
       if (!value) return "T20";
@@ -443,11 +603,14 @@ exports.rebuildAllPlayerStats = async () => {
     const initFormatBatting = () => ({ matches: 0, innings: 0, notOuts: 0, runs: 0, highestScore: 0, average: 0, strikeRate: 0, hundreds: 0, fifties: 0, fours: 0, sixes: 0 });
     const initFormatBowling = () => ({ matches: 0, innings: 0, wickets: 0, runs: 0, balls: 0, bestFigures: "0/0", average: 0, economy: 0, strikeRate: 0, fiveWickets: 0, maidens: 0 });
 
-    const ensurePlayerStats = (name) => {
-      const key = String(name || "").trim();
-      if (!key) return null;
+    const ensurePlayerStats = (participant) => {
+      const identity = resolveEmbeddedPlayer(participant, playerDirectory);
+      const existing = identity?.player;
+      const key = normalizePlayerId(identity?.playerId);
+      // Career documents can only be credited to an existing Player. Unknown
+      // IDs and ambiguous legacy names remain unassigned until migration.
+      if (!key || !existing) return null;
       if (!playerStatsMap[key]) {
-        const existing = players.find((p) => String(p.name || "").trim() === key);
         const baseBat = existing?.baseBatting || {};
         const baseBwl = existing?.baseBowling || {};
         playerStatsMap[key] = {
@@ -496,39 +659,51 @@ exports.rebuildAllPlayerStats = async () => {
 
     for (const match of matches) {
       const format = normalizeFormat(match.format);
-      const participantNames = new Set();
-      const addFromList = (items) => {
+      const actualBatters = new Set();
+      const actualBowlers = new Set();
+      const playerMatchParticipation = new Map(); // Track which players participated in THIS match
+      
+      // Collect actual participants (players who actually batted or bowled)
+      const addFromList = (items, targetSet) => {
         if (!Array.isArray(items)) return;
         items.forEach((entry) => {
-          if (!entry || !entry.name) return;
-          participantNames.add(String(entry.name).trim());
+          const identity = resolveEmbeddedPlayer(entry, playerDirectory);
+          if (!identity?.player) return;
+          targetSet.add(identity.playerId);
         });
       };
-      addFromList(match.squadA ? match.squadA.map((name) => ({ name })) : []);
-      addFromList(match.squadB ? match.squadB.map((name) => ({ name })) : []);
-      addFromList(match.innings1?.batsmen);
-      addFromList(match.innings1?.bowlers);
-      addFromList(match.innings2?.batsmen);
-      addFromList(match.innings2?.bowlers);
+      
+      addFromList(match.innings1?.batsmen, actualBatters);
+      addFromList(match.innings1?.bowlers, actualBowlers);
+      addFromList(match.innings2?.batsmen, actualBatters);
+      addFromList(match.innings2?.bowlers, actualBowlers);
+      
+      // Track all match participants (batters OR bowlers)
+      actualBatters.forEach((playerId) => playerMatchParticipation.set(playerId, true));
+      actualBowlers.forEach((playerId) => playerMatchParticipation.set(playerId, true));
 
-      participantNames.forEach((pName) => {
-        const pStats = ensurePlayerStats(pName);
+      // Initialize format maps for all participants
+      playerMatchParticipation.forEach((_, playerId) => {
+        const pStats = ensurePlayerStats({ playerId });
         if (!pStats) return;
-
         if (!pStats.battingByFormat.has(format)) pStats.battingByFormat.set(format, initFormatBatting());
         if (!pStats.bowlingByFormat.has(format)) pStats.bowlingByFormat.set(format, initFormatBowling());
+      });
 
-        const formatBat = pStats.battingByFormat.get(format);
-        const formatBowl = pStats.bowlingByFormat.get(format);
-        formatBat.matches += 1;
-        formatBowl.matches += 1;
+      // Increment match count ONCE per player per match
+      playerMatchParticipation.forEach((_, playerId) => {
+        const pStats = ensurePlayerStats({ playerId });
+        if (!pStats) return;
+        pStats.batting.matches += 1;
+        pStats.bowling.matches += 1;
+        pStats.battingByFormat.get(format).matches += 1;
+        pStats.bowlingByFormat.get(format).matches += 1;
       });
 
       const applyBatting = (inn) => {
         if (!inn || !Array.isArray(inn.batsmen)) return;
         inn.batsmen.forEach((b) => {
-          if (!b || !b.name) return;
-          const pStats = ensurePlayerStats(b.name);
+          const pStats = ensurePlayerStats(b);
           if (!pStats) return;
           if (!pStats.battingByFormat.has(format)) pStats.battingByFormat.set(format, initFormatBatting());
           const cBat = pStats.batting;
@@ -537,8 +712,7 @@ exports.rebuildAllPlayerStats = async () => {
           const balls = Number(b.balls || 0);
           const fours = Number(b.fours || 0);
           const sixes = Number(b.sixes || 0);
-          cBat.matches += 1;
-          fBat.matches += 1;
+          // DO NOT increment matches here - it's done once per player per match above
           fBat.innings += 1;
           fBat.runs += runs;
           fBat.balls += balls;
@@ -548,6 +722,7 @@ exports.rebuildAllPlayerStats = async () => {
           if (runs >= 100) fBat.hundreds += 1;
           else if (runs >= 50) fBat.fifties += 1;
           if (!b.isOut) fBat.notOuts += 1;
+          // DO NOT increment batting.matches here - see note above
           cBat.innings += 1;
           cBat.runs += runs;
           cBat.balls += balls;
@@ -563,8 +738,7 @@ exports.rebuildAllPlayerStats = async () => {
       const applyBowling = (inn) => {
         if (!inn || !Array.isArray(inn.bowlers)) return;
         inn.bowlers.forEach((bw) => {
-          if (!bw || !bw.name) return;
-          const pStats = ensurePlayerStats(bw.name);
+          const pStats = ensurePlayerStats(bw);
           if (!pStats) return;
           if (!pStats.bowlingByFormat.has(format)) pStats.bowlingByFormat.set(format, initFormatBowling());
           const cBowl = pStats.bowling;
@@ -573,8 +747,7 @@ exports.rebuildAllPlayerStats = async () => {
           const runs = Number(bw.runs || 0);
           const balls = Number(bw.balls || 0);
           const maidens = Number(bw.maidens || 0);
-          cBowl.matches += 1;
-          fBowl.matches += 1;
+          // DO NOT increment matches here - it's done once per player per match above
           fBowl.innings += 1;
           fBowl.wickets += wickets;
           fBowl.runs += runs;
@@ -582,6 +755,7 @@ exports.rebuildAllPlayerStats = async () => {
           fBowl.maidens += maidens;
           if (wickets >= 5) fBowl.fiveWickets += 1;
           fBowl.bestFigures = compareBestFigures(fBowl.bestFigures, wickets, runs);
+          // DO NOT increment bowling.matches here - see note above
           cBowl.innings += 1;
           cBowl.wickets += wickets;
           cBowl.runs += runs;
@@ -599,7 +773,7 @@ exports.rebuildAllPlayerStats = async () => {
     }
 
     for (const player of players) {
-      const stats = ensurePlayerStats(player.name);
+      const stats = ensurePlayerStats({ playerId: player._id, nameSnapshot: player.name });
       if (!stats) continue;
       calcRatesAndAverages(stats.batting, stats.bowling);
       stats.battingByFormat.forEach((val) => calcRatesAndAverages(val, { wickets: 0, runs: 0, balls: 0, average: 0, strikeRate: 0, economy: 0 }));
@@ -617,4 +791,13 @@ exports.rebuildAllPlayerStats = async () => {
     console.error("rebuildAllPlayerStats failed:", error);
     return false;
   }
+};
+
+exports._test = {
+  aggregatePointsFromMatches,
+  buildPlayerMatchConditions,
+  createPlayerDirectory,
+  extractPlayerStatsFromMatch,
+  findPlayerParticipant,
+  resolveEmbeddedPlayer,
 };

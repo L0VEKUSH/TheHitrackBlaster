@@ -109,6 +109,7 @@ class InningsHarness {
       bowlerName: selectedBowler,
       batsmanRuns: 0,
       extraRuns: 0,
+      isFreeHit: before.freeHitPending,
       ...input,
     });
     this.events.push(event);
@@ -414,6 +415,83 @@ describe("scoringEngine: extras", () => {
   });
 });
 
+describe("scoringEngine: free-hit state", () => {
+  test("a no-ball marks the following delivery as a free hit", () => {
+    const innings = new InningsHarness();
+    const noBall = innings.ball({ extraType: "noBall", extraRuns: 1 });
+    let state = innings.state();
+
+    assert.equal(noBall.isFreeHit, false);
+    assert.equal(state.freeHitPending, true);
+    assert.equal(state.commentary[0].isFreeHit, false);
+
+    const freeHit = innings.ball({ batsmanRuns: 1 });
+    state = innings.state();
+    assert.equal(freeHit.isFreeHit, true);
+    assert.equal(state.freeHitPending, false);
+    assert.equal(state.commentary[0].isFreeHit, true);
+  });
+
+  test("wides and repeated no-balls preserve a pending free hit until a legal ball", () => {
+    const innings = new InningsHarness();
+    innings.ball({ extraType: "noBall", extraRuns: 1 });
+    const wide = innings.ball({ extraType: "wide", extraRuns: 1 });
+    const repeatedNoBall = innings.ball({ extraType: "noBall", extraRuns: 1 });
+    let state = innings.state();
+
+    assert.equal(wide.isFreeHit, true);
+    assert.equal(repeatedNoBall.isFreeHit, true);
+    assert.equal(state.freeHitPending, true);
+
+    innings.ball({ batsmanRuns: 2 });
+    state = innings.state();
+    assert.equal(state.freeHitPending, false);
+  });
+
+  test("a delivery wicket on a free hit is rejected and cannot be credited", () => {
+    const innings = new InningsHarness();
+    innings.ball({ extraType: "noBall", extraRuns: 1 });
+    innings.ball({ isWicket: true, wicketType: "bowled", outPlayerName: "Alice" });
+
+    assert.throws(
+      () => innings.state(),
+      (error) => error instanceof ScoringError && error.code === "WICKET_ON_FREE_HIT",
+    );
+    innings.undo();
+    const state = innings.state();
+    assert.equal(state.wickets, 0);
+    assert.equal(bowler(state, "Blake").wickets, 0);
+    assert.equal(state.freeHitPending, true);
+  });
+
+  test("a non-delivery dismissal does not consume the pending free hit", () => {
+    const innings = new InningsHarness();
+    innings.ball({ extraType: "noBall", extraRuns: 1 });
+    innings.ball({
+      isWicket: true,
+      wicketType: "retiredOut",
+      outPlayerName: "Beth",
+      bowlerName: "",
+    });
+    const state = innings.state();
+
+    assert.equal(state.wickets, 1);
+    assert.equal(state.freeHitPending, true);
+    assert.equal(bowler(state, "Blake").wickets, 0);
+  });
+
+  test("undo and disabled rules derive the pending flag deterministically", () => {
+    const innings = new InningsHarness();
+    innings.ball({ extraType: "noBall", extraRuns: 1 });
+    innings.ball({ batsmanRuns: 4 });
+    assert.equal(innings.state().freeHitPending, false);
+
+    innings.undo();
+    assert.equal(innings.state().freeHitPending, true);
+    assert.equal(innings.state({ freeHitEnabled: false }).freeHitPending, false);
+  });
+});
+
 describe("scoringEngine: wicket handling", () => {
   for (const wicketType of ["bowled", "caught", "lbw", "stumped", "hitWicket"]) {
     test(`${wicketType} is a team wicket credited to the bowler`, () => {
@@ -640,6 +718,59 @@ describe("scoringEngine: wicket handling", () => {
 });
 
 describe("scoringEngine: player statistics, partnerships, and commentary", () => {
+  test("same-name players remain distinct when their immutable IDs differ", () => {
+    const batterOneId = "507f1f77bcf86cd799439101";
+    const batterTwoId = "507f1f77bcf86cd799439102";
+    const bowlerId = "507f1f77bcf86cd799439103";
+    const events = [
+      createControlEvent(ADD_BATTER, {
+        actionId: "same-name-batter-one",
+        sequence: 1,
+        inningsNumber: 1,
+        playerId: batterOneId,
+        nameSnapshot: "Alex Smith",
+        isStriker: true,
+      }),
+      createControlEvent(ADD_BATTER, {
+        actionId: "same-name-batter-two",
+        sequence: 2,
+        inningsNumber: 1,
+        playerId: batterTwoId,
+        nameSnapshot: "Alex Smith",
+        isStriker: false,
+      }),
+      createControlEvent(ADD_BOWLER, {
+        actionId: "same-name-bowler-one",
+        sequence: 3,
+        inningsNumber: 1,
+        playerId: bowlerId,
+        nameSnapshot: "Jordan Lee",
+      }),
+      canonicalizeBallEvent({
+        actionId: "same-name-score-one",
+        sequence: 4,
+        inningsNumber: 1,
+        batterId: batterOneId,
+        batterNameSnapshot: "Alex Smith",
+        nonStrikerId: batterTwoId,
+        nonStrikerNameSnapshot: "Alex Smith",
+        bowlerId,
+        bowlerNameSnapshot: "Jordan Lee",
+        batsmanRuns: 4,
+        extraRuns: 0,
+        isFreeHit: false,
+      }),
+    ];
+
+    const state = rebuildInnings({ battingTeam: "Team A", bowlingTeam: "Team B", events });
+    const first = state.batsmen.find((player) => player.playerId === batterOneId);
+    const second = state.batsmen.find((player) => player.playerId === batterTwoId);
+    assert.equal(state.batsmen.length, 2);
+    assert.equal(first.runs, 4);
+    assert.equal(second.runs, 0);
+    assert.equal(first.nameSnapshot, second.nameSnapshot);
+  });
+
   test("one event stream deterministically derives every related scorecard value", () => {
     const innings = new InningsHarness();
     innings.ball({ batsmanRuns: 4, commentary: "FOUR through cover" });

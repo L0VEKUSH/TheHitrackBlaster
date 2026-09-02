@@ -3,7 +3,7 @@ const express          = require("express");
 const r                = express.Router();
 const {
   getMatches, getLiveMatches, getMatch,
-  createMatch, updateMatch, deleteMatch,
+  createMatch, updateMatch, updatePlayingXI, deleteMatch,
 } = require("../controllers/matchController");
 const liveScoring = require("../controllers/liveScoringController");
 const { protectAdmin } = require("../middleware/auth");
@@ -18,6 +18,7 @@ r.get("/:id/ai-predictions",        require("../controllers/matchController").ge
 // Admin
 r.post("/",                         protectAdmin, createMatch);
 r.put("/:id",                       protectAdmin, preventConcurrentUpdates, updateMatch);
+r.put("/:id/playing-xi",            protectAdmin, preventConcurrentUpdates, updatePlayingXI);
 r.delete("/:id",                    protectAdmin, preventConcurrentUpdates, deleteMatch);
 r.post("/:id/toss",                 protectAdmin, preventConcurrentUpdates, liveScoring.setToss);
 r.post("/:id/score",                protectAdmin, preventConcurrentUpdates, liveScoring.updateScore);

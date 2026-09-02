@@ -105,6 +105,19 @@ const tournamentSchema = new mongoose.Schema({
   type: { type: String, enum: ["series", "bilateral", "tri-series", "league", "cup", "championship"], default: "series" },
   format: { type: String, default: "" },
   rules: { type: String, default: "" },
+  rulesConfig: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+    // Structured cricket rules (replaces plain-text rules)
+    // Example: {
+    //   innings: { overs: 20, maxWickets: 10 },
+    //   bowling: { maxOversPerBowler: null, allowConsecutiveOvers: false },
+    //   points: { win: 2, tie: 1, noResult: 1, loss: 0 },
+    //   superOver: { enabled: true, repeatIfTied: true, maxWickets: 2, overs: 1 },
+    //   freeHit: { enabled: true },
+    //   powerplay: { enabled: false }
+    // }
+  },
   startDate: { type: Date },
   endDate: { type: Date },
   host: { type: String, default: "" },

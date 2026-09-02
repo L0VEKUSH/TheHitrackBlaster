@@ -3,6 +3,7 @@
 const Match = require("../models/Match");
 const mongoose = require("mongoose");
 const Player = require("../models/Player");
+const { Tournament } = require("../models/other");
 const { createHash } = require("crypto");
 const { serializeMatch } = require("../services/matchSerializer");
 const {
@@ -24,6 +25,17 @@ const {
   snapshotInningsState,
   validateBallAgainstState,
 } = require("../services/scoringEngine");
+const { getRulesForTournament, isFreeHitEnabled } = require("../utils/tournamentRules");
+const {
+  findParticipant,
+  getMaxWicketsFromPlayingXI,
+  getPlayingXIForTeam,
+  isInPlayingXI,
+  normalizeIdentityText,
+  normalizeParticipant,
+  sameParticipant,
+  validatePlayerParticipation,
+} = require("../utils/playerIdentity");
 
 const MAX_EVENTS_PER_INNINGS = 2000;
 const MAX_PROCESSED_ACTIONS = 5000;
@@ -50,7 +62,12 @@ const asyncHandler = (handler) => async (req, res) => {
     const status = error.status || (error instanceof ScoringError ? error.status : 500);
     const message = status >= 500 ? "Unable to update the match" : error.message;
     if (status >= 500) console.error("Live scoring mutation failed:", error.message);
-    res.status(status).json({ success: false, message, code: error.code || "SCORING_ERROR" });
+    res.status(status).json({
+      success: false,
+      message,
+      code: error.code || "SCORING_ERROR",
+      ...(error.details ? { details: error.details } : {}),
+    });
   }
 };
 
@@ -91,6 +108,16 @@ const actionContext = (req, operation) => {
 
 const receiptFor = (match, actionId) => (match.processedActions || []).find((item) => item.actionId === actionId);
 
+const attachTournamentRules = async (match) => {
+  if (!match?.tournament || match.tournament?.rulesConfig) return;
+  const tournamentId = cleanName(match.tournament?._id || match.tournament);
+  if (!mongoose.Types.ObjectId.isValid(tournamentId)) return;
+  const tournament = await Tournament.findById(tournamentId).select("rulesConfig").lean();
+  if (!tournament) return;
+  match.$locals ||= {};
+  match.$locals.tournamentRules = tournament;
+};
+
 const loadForMutation = async (req, operation) => {
   const context = actionContext(req, operation);
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -98,6 +125,7 @@ const loadForMutation = async (req, operation) => {
   }
   const match = await Match.findById(req.params.id);
   if (!match) throw httpError(404, "Match not found", "MATCH_NOT_FOUND");
+  await attachTournamentRules(match);
 
   const receipt = receiptFor(match, context.actionId);
   if (receipt) {
@@ -151,10 +179,35 @@ const respondWithMatch = (res, match, extra = {}) => res.json({ success: true, m
 
 const teamOpposite = (match, team) => team === match.teamA ? match.teamB : match.teamA;
 
-const matchLimits = (match, superOver = false) => ({
-  maxWickets: superOver ? 2 : 10,
-  maxBalls: superOver ? 6 : match.format === "Test" ? null : Math.max(1, Number(match.overs || 20)) * 6,
-});
+const tournamentRuleSource = (match) => match?.tournament?.rulesConfig
+  ? match.tournament
+  : match?.$locals?.tournamentRules || null;
+
+const matchLimits = (match, { superOver = false, battingTeam = "" } = {}) => {
+  const tournament = tournamentRuleSource(match);
+  const rules = getRulesForTournament(tournament);
+  const roster = getPlayingXIForTeam(match, battingTeam);
+  const rosterLimit = getMaxWicketsFromPlayingXI(roster, 10);
+
+  if (superOver) {
+    const configuredWickets = Math.max(1, Number(rules.superOver?.maxWickets ?? 2));
+    const configuredOvers = Math.max(1, Number(rules.superOver?.overs ?? 1));
+    return {
+      maxWickets: Math.min(rosterLimit, configuredWickets),
+      maxBalls: configuredOvers * 6,
+      freeHitEnabled: isFreeHitEnabled(tournament),
+    };
+  }
+
+  const configuredWickets = Number(rules.innings?.maxWickets);
+  const maxWickets = roster
+    ? Math.min(rosterLimit, Number.isFinite(configuredWickets) ? configuredWickets : rosterLimit)
+    : (Number.isFinite(configuredWickets) ? configuredWickets : 10);
+  const configuredOvers = Number(rules.innings?.overs);
+  const matchOvers = Number(match.overs || configuredOvers || 20);
+  const maxBalls = match.format === "Test" ? null : Math.max(1, matchOvers) * 6;
+  return { maxWickets, maxBalls, freeHitEnabled: isFreeHitEnabled(tournament) };
+};
 
 const freshInnings = (battingTeam, bowlingTeam) => ({
   ...emptyInningsState(battingTeam, bowlingTeam),
@@ -232,12 +285,16 @@ const ensureSecondInnings = (match, superOver = false) => {
 };
 
 const synchronizeRegulationMatch = (match) => {
-  const limits = matchLimits(match, false);
-  const first = projectInnings(match, "innings1", limits);
-  if (!first) return deriveMatchState(match, limits);
+  const firstTeam = match.innings1?.battingTeam || match.teamA;
+  const firstLimits = matchLimits(match, { battingTeam: firstTeam });
+  const first = projectInnings(match, "innings1", firstLimits);
+  if (!first) return deriveMatchState(match, firstLimits);
   if (first.isDone) ensureSecondInnings(match, false);
-  if (match.innings2) projectInnings(match, "innings2", { ...limits, target: first.runs + 1 });
-  deriveMatchState(match, limits);
+  const secondLimits = match.innings2
+    ? matchLimits(match, { battingTeam: match.innings2.battingTeam })
+    : firstLimits;
+  if (match.innings2) projectInnings(match, "innings2", { ...secondLimits, target: first.runs + 1 });
+  deriveMatchState(match, match.innings2 ? secondLimits : firstLimits);
   if (!first.isDone && match.innings2) {
     const secondRaw = plainInnings(match.innings2);
     const hasSecondHistory = Boolean(secondRaw.historyBase) || (secondRaw.events || []).length > 0;
@@ -246,25 +303,35 @@ const synchronizeRegulationMatch = (match) => {
 };
 
 const synchronizeSuperOver = (match) => {
-  const limits = matchLimits(match, true);
-  const first = projectInnings(match, "superOverInnings1", limits);
+  const firstLimits = matchLimits(match, {
+    superOver: true,
+    battingTeam: match.superOverInnings1?.battingTeam || match.teamA,
+  });
+  const first = projectInnings(match, "superOverInnings1", firstLimits);
   if (!first) throw new ScoringError("Super over is not initialized", 422, "SUPER_OVER_NOT_INITIALIZED");
   if (first.isDone) ensureSecondInnings(match, true);
+  const secondLimits = match.superOverInnings2
+    ? matchLimits(match, { superOver: true, battingTeam: match.superOverInnings2.battingTeam })
+    : firstLimits;
   const second = match.superOverInnings2
-    ? projectInnings(match, "superOverInnings2", { ...limits, target: first.runs + 1 })
+    ? projectInnings(match, "superOverInnings2", { ...secondLimits, target: first.runs + 1 })
     : null;
 
   match.currentInnings = first.isDone ? 2 : 1;
   match.target = first.isDone ? first.runs + 1 : 0;
   const current = match.currentInnings === 2 ? second : first;
   match.requiredRuns = second ? Math.max(0, match.target - second.runs) : 0;
-  const ballsRemaining = second ? Math.max(0, 6 - second.balls) : 0;
+  const ballsRemaining = second && Number.isFinite(secondLimits.maxBalls)
+    ? Math.max(0, secondLimits.maxBalls - second.balls)
+    : 0;
   match.requiredRunRate = ballsRemaining > 0 && match.requiredRuns > 0
     ? Number((match.requiredRuns / (ballsRemaining / 6)).toFixed(2))
     : 0;
   match.recentBalls = current?.recentBalls?.slice(-12) || [];
   match.currentBatsmen = current ? activeBatters(current).map((batter) => batter.name) : [];
+  match.currentBatsmenIds = current ? activeBatters(current).map((batter) => batter.playerId || "") : [];
   match.currentBowler = current?.currentBowler || "";
+  match.currentBowlerId = current?.currentBowlerId || "";
   if (second && second.isDone) {
     match.status = "completed";
     match.phase = "finished";
@@ -283,7 +350,7 @@ const synchronizeSuperOver = (match) => {
 const synchronizeMatch = (match) => {
   if (match.isSuperOver) synchronizeSuperOver(match);
   else synchronizeRegulationMatch(match);
-  match.schemaVersion = 2;
+  match.schemaVersion = 3;
 };
 
 const contextKey = (match, inningsNumber = match.currentInnings || 1) => match.isSuperOver
@@ -328,22 +395,54 @@ const appendEvent = (match, key, event, { clearRedo = true } = {}) => {
   match.markModified("redoStack");
 };
 
-const validateSquadPlayer = (match, team, name, role) => {
-  const squad = team === match.teamA ? match.squadA : match.squadB;
-  if (Array.isArray(squad) && squad.length > 0 && !squad.includes(name)) {
-    throw new ScoringError(`${name} is not in ${team}'s selected squad`, 422, `INVALID_${role.toUpperCase()}`);
+const validateTeamParticipation = (match, team, participant, role) => {
+  const roster = getPlayingXIForTeam(match, team);
+  const validation = validatePlayerParticipation(participant, roster, role);
+  if (!validation.valid) {
+    throw new ScoringError(validation.reason, 422, "PLAYER_NOT_IN_PLAYING_XI");
   }
 };
 
-const validatePlayerId = async (playerId, name, role) => {
-  if (!playerId) return;
+const findPlayerById = async (playerId) => {
+  const query = Player.findById(playerId);
+  if (query && typeof query.select === "function") return query.select("name fullName team role photo").lean();
+  return query;
+};
+
+const requireExistingPlayer = async (participant, role, { authoritativeName = false } = {}) => {
+  const requested = normalizeParticipant(participant);
+  const playerId = requested.playerId;
+  if (!playerId) {
+    throw new ScoringError(`${role} player ID is required`, 422, "PLAYER_ID_REQUIRED");
+  }
   if (!mongoose.Types.ObjectId.isValid(playerId)) {
     throw httpError(400, `Invalid ${role} player ID`, "INVALID_PLAYER_ID");
   }
-  const player = await Player.findById(playerId).select("name").lean();
-  if (!player || cleanName(player.name) !== cleanName(name)) {
-    throw new ScoringError(`${role} player ID does not match the selected player`, 422, "PLAYER_ID_MISMATCH");
+  const player = await findPlayerById(playerId);
+  if (!player) {
+    throw new ScoringError(`${role} player does not exist`, 422, "PLAYER_NOT_FOUND");
   }
+  return {
+    playerId: cleanName(player._id || playerId),
+    nameSnapshot: authoritativeName
+      ? cleanName(player.name)
+      : requested.nameSnapshot || cleanName(player.name),
+  };
+};
+
+const findAuthoritativeParticipant = (items, reference, role) => {
+  const requested = normalizeParticipant(reference);
+  if (requested.playerId) return findParticipant(items, requested);
+  const requestedName = normalizeIdentityText(requested.nameSnapshot);
+  if (!requestedName) return null;
+  const matches = (Array.isArray(items) ? items : []).filter((item) =>
+    normalizeIdentityText(normalizeParticipant(item).nameSnapshot) === requestedName);
+  if (matches.length > 1) {
+    const error = new ScoringError(`Multiple ${role} candidates share that name; confirm the player ID`, 409, "PLAYER_CONFIRMATION_REQUIRED");
+    error.details = { candidates: matches.map(normalizeParticipant) };
+    throw error;
+  }
+  return matches[0] || null;
 };
 
 const logMutation = (operation, match, key, event, before, after) => {
@@ -425,7 +524,9 @@ exports.setToss = asyncHandler(async (req, res) => {
   match.requiredRunRate = 0;
   match.recentBalls = [];
   match.currentBatsmen = [];
+  match.currentBatsmenIds = [];
   match.currentBowler = "";
+  match.currentBowlerId = "";
   match.redoStack = [];
   nextSequence(match);
   const saved = await saveMutation(match, context);
@@ -440,7 +541,10 @@ exports.updateScore = asyncHandler(async (req, res) => {
   ensureMatchIsLive(match);
   const { inningsNumber, key } = ensureCurrentInnings(match, req.body.inningsNum);
   const raw = prepareHistory(match[key]);
-  const limits = matchLimits(match, match.isSuperOver);
+  const limits = matchLimits(match, {
+    superOver: Boolean(match.isSuperOver),
+    battingTeam: raw.battingTeam,
+  });
   const target = inningsNumber === 2
     ? ((match.isSuperOver ? match.superOverInnings1 : match.innings1)?.runs || 0) + 1
     : null;
@@ -452,32 +556,105 @@ exports.updateScore = asyncHandler(async (req, res) => {
     ...limits,
     target,
   });
-  const nonStriker = activeBatters(before).find((batter) => batter.name !== cleanName(req.body.batterName));
-  const event = canonicalizeBallEvent({
+  const active = activeBatters(before);
+  const requestedBatter = findAuthoritativeParticipant(active, {
+    playerId: req.body.batterId,
+    nameSnapshot: req.body.batterNameSnapshot || req.body.batterName,
+  }, "batter");
+  const inferredNonStriker = requestedBatter
+    ? active.find((batter) => !sameParticipant(batter, requestedBatter))
+    : null;
+  const draft = canonicalizeBallEvent({
     ...req.body,
     actionId: context.actionId,
     sequence: nextSequence(match),
     inningsNumber,
-    nonStrikerName: req.body.nonStrikerName || nonStriker?.name,
+    nonStrikerName: req.body.nonStrikerName || inferredNonStriker?.name,
+    nonStrikerId: req.body.nonStrikerId || inferredNonStriker?.playerId,
+    isFreeHit: Boolean(before.freeHitPending),
   });
+  const adjustment = draft.extraType === "penalty" || draft.extraType === "bonus";
+  const nonDeliveryDismissal = draft.isWicket && draft.nonDelivery;
+  if (adjustment && [
+    draft.batterId,
+    draft.batterName,
+    draft.nonStrikerId,
+    draft.nonStrikerName,
+    draft.bowlerId,
+    draft.bowlerName,
+    draft.outPlayerId,
+    draft.outPlayerName,
+    draft.fielderId,
+    draft.fielderName,
+  ].some(Boolean)) {
+    throw new ScoringError("A score adjustment cannot include player participants", 422, "INVALID_ADJUSTMENT");
+  }
+  if (nonDeliveryDismissal && (draft.bowlerId || draft.bowlerName)) {
+    throw new ScoringError("A non-delivery dismissal cannot include a bowler", 422, "INVALID_BOWLER");
+  }
   const bowlingTeam = before.bowlingTeam || teamOpposite(match, before.battingTeam);
-  if (event.batterName) {
-    validateSquadPlayer(match, before.battingTeam, event.batterName, "batter");
+
+  let batter = null;
+  let nonStriker = null;
+  let bowler = null;
+  let dismissed = null;
+  let fielder = null;
+  if (!adjustment) {
+    batter = requestedBatter;
+    nonStriker = inferredNonStriker;
+    if (!batter) throw new ScoringError("Selected striker is not an active batter", 422, "INVALID_STRIKER");
+    await Promise.all([
+      requireExistingPlayer(batter, "Batter"),
+      requireExistingPlayer(nonStriker, "Non-striker"),
+    ]);
+    validateTeamParticipation(match, before.battingTeam, batter, "bat");
+    validateTeamParticipation(match, before.battingTeam, nonStriker, "bat");
   }
-  if (event.bowlerName) {
-    validateSquadPlayer(match, bowlingTeam, event.bowlerName, "bowler");
+  if (!adjustment && !nonDeliveryDismissal) {
+    bowler = findAuthoritativeParticipant(before.bowlers, {
+      playerId: draft.bowlerId,
+      nameSnapshot: draft.bowlerNameSnapshot || draft.bowlerName,
+    }, "bowler");
+    if (!bowler) throw new ScoringError("Selected bowler has not been added to this innings", 422, "INVALID_BOWLER");
+    await requireExistingPlayer(bowler, "Bowler");
+    validateTeamParticipation(match, bowlingTeam, bowler, "bowl");
   }
-  if (event.isWicket && event.outPlayerName && event.outPlayerName !== event.batterName) {
-    validateSquadPlayer(match, before.battingTeam, event.outPlayerName, "batter");
+  if (draft.isWicket) {
+    dismissed = findAuthoritativeParticipant(active, {
+      playerId: draft.outPlayerId,
+      nameSnapshot: draft.outPlayerNameSnapshot || draft.outPlayerName,
+    }, "dismissed batter");
+    if (!dismissed) throw new ScoringError("Dismissed player is not an active batter", 422, "INVALID_DISMISSED_BATTER");
+    await requireExistingPlayer(dismissed, "Dismissed batter");
+    validateTeamParticipation(match, before.battingTeam, dismissed, "bat");
   }
-  if (event.fielderName) validateSquadPlayer(match, bowlingTeam, event.fielderName, "fielder");
-  await Promise.all([
-    validatePlayerId(event.batterId, event.batterName, "Batter"),
-    validatePlayerId(event.nonStrikerId, event.nonStrikerName, "Non-striker"),
-    validatePlayerId(event.bowlerId, event.bowlerName, "Bowler"),
-    validatePlayerId(event.outPlayerId, event.outPlayerName, "Dismissed batter"),
-    validatePlayerId(event.fielderId, event.fielderName, "Fielder"),
-  ]);
+  if (draft.fielderName || draft.fielderId) {
+    fielder = await requireExistingPlayer({
+      playerId: draft.fielderId,
+      nameSnapshot: draft.fielderNameSnapshot || draft.fielderName,
+    }, "Fielder");
+  }
+
+  const event = canonicalizeBallEvent({
+    ...draft,
+    batterId: batter?.playerId || "",
+    batterName: batter?.nameSnapshot || batter?.name || "",
+    batterNameSnapshot: batter?.nameSnapshot || batter?.name || "",
+    nonStrikerId: nonStriker?.playerId || "",
+    nonStrikerName: nonStriker?.nameSnapshot || nonStriker?.name || "",
+    nonStrikerNameSnapshot: nonStriker?.nameSnapshot || nonStriker?.name || "",
+    bowlerId: bowler?.playerId || "",
+    bowlerName: bowler?.nameSnapshot || bowler?.name || "",
+    bowlerNameSnapshot: bowler?.nameSnapshot || bowler?.name || "",
+    outPlayerId: dismissed?.playerId || "",
+    outPlayerName: dismissed?.nameSnapshot || dismissed?.name || "",
+    outPlayerNameSnapshot: dismissed?.nameSnapshot || dismissed?.name || "",
+    fielderId: fielder?.playerId || "",
+    fielderName: fielder?.nameSnapshot || "",
+    fielderNameSnapshot: fielder?.nameSnapshot || "",
+    isFreeHit: Boolean(before.freeHitPending),
+    rulesVersion: 2,
+  });
   validateBallAgainstState(before, event);
   appendEvent(match, key, event);
   synchronizeMatch(match);
@@ -492,7 +669,12 @@ exports.updateScore = asyncHandler(async (req, res) => {
     logMutation("BALL", saved.match, key, event, before, saved.match[key]);
     scheduleDerivedRebuilds(saved.match, { refreshAggregates });
   }
-  respondWithMatch(res, saved.match, { duplicate: saved.duplicate, isOverComplete, eventSequence: event.sequence });
+  respondWithMatch(res, saved.match, {
+    duplicate: saved.duplicate,
+    isOverComplete,
+    freeHitPending: Boolean(saved.match[key]?.freeHitPending),
+    eventSequence: event.sequence,
+  });
 });
 
 exports.addBatsman = asyncHandler(async (req, res) => {
@@ -501,10 +683,11 @@ exports.addBatsman = asyncHandler(async (req, res) => {
   const { match, context } = loaded;
   ensureMatchIsLive(match);
   const { inningsNumber, key } = ensureCurrentInnings(match, Number(req.params.num));
-  const name = cleanName(req.body.name);
-  if (!name) throw httpError(400, "Batter name is required", "BATTER_REQUIRED");
   const raw = prepareHistory(match[key]);
-  const limits = matchLimits(match, match.isSuperOver);
+  const limits = matchLimits(match, {
+    superOver: Boolean(match.isSuperOver),
+    battingTeam: raw.battingTeam,
+  });
   const current = rebuildInnings({
     battingTeam: raw.battingTeam,
     bowlingTeam: raw.bowlingTeam,
@@ -513,28 +696,35 @@ exports.addBatsman = asyncHandler(async (req, res) => {
     ...limits,
     target: inningsNumber === 2 ? match.target : null,
   });
-  validateSquadPlayer(match, current.battingTeam, name, "batter");
-  await validatePlayerId(cleanName(req.body.playerId), name, "Batter");
-  if (current.bowlers.some((bowler) => bowler.name === name)) {
+  const participant = await requireExistingPlayer({
+    playerId: req.body.playerId,
+    nameSnapshot: req.body.nameSnapshot || req.body.name,
+  }, "Batter", { authoritativeName: true });
+  const name = participant.nameSnapshot;
+  validateTeamParticipation(match, current.battingTeam, participant, "bat");
+
+  if (current.bowlers.some((bowler) => sameParticipant(bowler, participant))) {
     throw new ScoringError("A selected bowler cannot bat for the opposing side", 422, "INVALID_BATTER_TEAM");
   }
-  if (current.batsmen.some((batter) => batter.name === name && batter.isOut)) {
+  if (current.batsmen.some((batter) => sameParticipant(batter, participant) && batter.isOut)) {
     throw new ScoringError("A dismissed batter cannot return", 422, "BATTER_ALREADY_DISMISSED");
   }
-  if (activeBatters(current).some((batter) => batter.name === name)) {
+  if (activeBatters(current).some((batter) => sameParticipant(batter, participant))) {
     return respondWithMatch(res, match, { idempotent: true });
   }
   if (activeBatters(current).length >= 2) throw new ScoringError("Two batters are already active", 422, "ACTIVE_BATTERS_FULL");
+  
   const active = activeBatters(current);
   const isStriker = active.length === 0 || !active.some((batter) => batter.isStriker);
   const event = createControlEvent(ADD_BATTER, {
     actionId: context.actionId,
     sequence: nextSequence(match),
     inningsNumber,
-    name,
+    playerId: participant.playerId,
+    nameSnapshot: name,
     isStriker,
+    rulesVersion: 2,
   });
-  event.playerId = cleanName(req.body.playerId);
   appendEvent(match, key, event);
   synchronizeMatch(match);
   refreshCompletionStatistics(match);
@@ -549,12 +739,13 @@ exports.addBowler = asyncHandler(async (req, res) => {
   const { match, context } = loaded;
   ensureMatchIsLive(match);
   const { inningsNumber, key } = ensureCurrentInnings(match, Number(req.params.num));
-  const name = cleanName(req.body.name);
-  if (!name) throw httpError(400, "Bowler name is required", "BOWLER_REQUIRED");
   const raw = prepareHistory(match[key]);
   const battingTeam = raw.battingTeam;
   const bowlingTeam = raw.bowlingTeam || teamOpposite(match, battingTeam);
-  const limits = matchLimits(match, match.isSuperOver);
+  const limits = matchLimits(match, {
+    superOver: Boolean(match.isSuperOver),
+    battingTeam,
+  });
   const current = rebuildInnings({
     battingTeam,
     bowlingTeam,
@@ -563,31 +754,48 @@ exports.addBowler = asyncHandler(async (req, res) => {
     ...limits,
     target: inningsNumber === 2 ? match.target : null,
   });
-  validateSquadPlayer(match, bowlingTeam, name, "bowler");
-  await validatePlayerId(cleanName(req.body.playerId), name, "Bowler");
-  const battingSquad = battingTeam === match.teamA ? match.squadA : match.squadB;
-  if (Array.isArray(battingSquad) && battingSquad.includes(name)) {
+  const participant = await requireExistingPlayer({
+    playerId: req.body.playerId,
+    nameSnapshot: req.body.nameSnapshot || req.body.name,
+  }, "Bowler", { authoritativeName: true });
+  const name = participant.nameSnapshot;
+  validateTeamParticipation(match, bowlingTeam, participant, "bowl");
+
+  const battingRoster = getPlayingXIForTeam(match, battingTeam);
+  if (battingRoster && isInPlayingXI(participant, battingRoster)) {
     throw new ScoringError("A member of the batting team cannot be selected as bowler", 422, "INVALID_BOWLER_TEAM");
   }
-  if (current.batsmen.some((batter) => batter.name === name)) {
+
+  if (current.batsmen.some((batter) => sameParticipant(batter, participant))) {
     throw new ScoringError("A batter in this innings cannot be selected as bowler", 422, "INVALID_BOWLER_TEAM");
   }
-  if (current.balls > 0 && current.balls % 6 === 0 && current.lastOverBowler === name) {
+  if (current.balls > 0 && current.balls % 6 === 0 && sameParticipant(
+    { playerId: current.lastOverBowlerId, nameSnapshot: current.lastOverBowler },
+    participant,
+  )) {
     throw new ScoringError("A bowler cannot bowl consecutive overs", 422, "CONSECUTIVE_OVERS");
   }
-  if (current.currentOverStarted && current.currentBowler && current.currentBowler !== name) {
+  if (current.currentOverStarted && (current.currentBowlerId || current.currentBowler) && !sameParticipant(
+    { playerId: current.currentBowlerId, nameSnapshot: current.currentBowler },
+    participant,
+  )) {
     throw new ScoringError("The bowler cannot be changed during an over", 422, "BOWLER_CHANGE_MID_OVER");
   }
-  if (current.currentBowler === name) {
+  if (sameParticipant(
+    { playerId: current.currentBowlerId, nameSnapshot: current.currentBowler },
+    participant,
+  )) {
     return respondWithMatch(res, match, { idempotent: true });
   }
+  
   const event = createControlEvent(ADD_BOWLER, {
     actionId: context.actionId,
     sequence: nextSequence(match),
     inningsNumber,
-    name,
+    playerId: participant.playerId,
+    nameSnapshot: name,
+    rulesVersion: 2,
   });
-  event.playerId = cleanName(req.body.playerId);
   appendEvent(match, key, event);
   synchronizeMatch(match);
   refreshCompletionStatistics(match);
@@ -785,25 +993,47 @@ exports.setManOfTheMatch = asyncHandler(async (req, res) => {
   const loaded = await loadForMutation(req, "SET_MAN_OF_MATCH");
   if (loaded.duplicate) return respondWithMatch(res, loaded.match, { duplicate: true });
   const { match, context } = loaded;
-  const name = cleanName(req.body.name).slice(0, 120);
+  const requestedName = cleanName(req.body.nameSnapshot || req.body.name).slice(0, 120);
+  const requestedId = cleanName(req.body.playerId);
   const reason = (cleanName(req.body.reason) || "Selected by admin").slice(0, 300);
-  if (name) {
-    const participants = new Set([
-      ...(match.squadA || []),
-      ...(match.squadB || []),
-      ...(match.innings1?.batsmen || []).map((player) => player.name),
-      ...(match.innings1?.bowlers || []).map((player) => player.name),
-      ...(match.innings2?.batsmen || []).map((player) => player.name),
-      ...(match.innings2?.bowlers || []).map((player) => player.name),
-    ].map(cleanName).filter(Boolean));
-    if (!participants.has(name)) {
-      throw new ScoringError("Man of the Match must be a match participant", 422, "INVALID_MAN_OF_MATCH");
+  const participantValues = [
+    ...(getPlayingXIForTeam(match, match.teamA)?.playingXI || []),
+    ...(getPlayingXIForTeam(match, match.teamB)?.playingXI || []),
+    ...(match.innings1?.batsmen || []),
+    ...(match.innings1?.bowlers || []),
+    ...(match.innings2?.batsmen || []),
+    ...(match.innings2?.bowlers || []),
+  ];
+  let selected = null;
+  if (requestedId || requestedName) {
+    if (requestedId) {
+      selected = findParticipant(participantValues, { playerId: requestedId, nameSnapshot: requestedName });
+    } else {
+      const matches = participantValues
+        .map(normalizeParticipant)
+        .filter((participant) => cleanName(participant.nameSnapshot).toLocaleLowerCase("en") === requestedName.toLocaleLowerCase("en"));
+      const uniqueIds = [...new Set(matches.map((participant) => participant.playerId).filter(Boolean))];
+      if (uniqueIds.length > 1) {
+        const error = new ScoringError("Multiple match participants share that name; confirm the player ID", 409, "PLAYER_CONFIRMATION_REQUIRED");
+        error.details = { candidates: matches };
+        throw error;
+      }
+      selected = matches[0] || null;
     }
+    if (!selected) throw new ScoringError("Man of the Match must be a match participant", 422, "INVALID_MAN_OF_MATCH");
+    selected = await requireExistingPlayer(selected, "Man of the Match");
   }
 
   const statistics = clone(match.statistics) || {};
-  statistics.manOfTheMatch = name
-    ? { name, reason, selectedByAdmin: true, selectedAt: new Date() }
+  statistics.manOfTheMatch = selected
+    ? {
+      playerId: selected.playerId,
+      name: selected.nameSnapshot,
+      nameSnapshot: selected.nameSnapshot,
+      reason,
+      selectedByAdmin: true,
+      selectedAt: new Date(),
+    }
     : null;
   match.statistics = statistics;
   match.markModified("statistics");
@@ -828,6 +1058,7 @@ exports._test = {
   appendEvent,
   contextKey,
   freshInnings,
+  matchLimits,
   prepareHistory,
   projectInnings,
   scheduleDerivedRebuilds,

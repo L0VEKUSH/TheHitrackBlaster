@@ -1,5 +1,12 @@
 "use strict";
 
+const {
+  findParticipant,
+  normalizeParticipant,
+  participantKey,
+  sameParticipant,
+} = require("../utils/playerIdentity");
+
 const BALL = "BALL";
 const ADD_BATTER = "ADD_BATTER";
 const ADD_BOWLER = "ADD_BOWLER";
@@ -109,11 +116,14 @@ const emptyInningsState = (battingTeam = "", bowlingTeam = "") => ({
   fallOfWickets: [],
   partnerships: [],
   lastOverBowler: "",
+  lastOverBowlerId: "",
   currentBowler: "",
+  currentBowlerId: "",
   currentOverStarted: false,
   overHistory: [],
   milestones: [],
   recentBalls: [],
+  freeHitPending: false,
   isDone: false,
   endReason: "",
 });
@@ -135,7 +145,8 @@ const normalizeExtras = (raw, totalExtras) => {
 };
 
 const normalizeBatsman = (raw = {}) => ({
-  name: cleanName(raw.name),
+  name: cleanName(raw.nameSnapshot || raw.name),
+  nameSnapshot: cleanName(raw.nameSnapshot || raw.name),
   playerId: cleanName(raw.playerId || raw._id),
   runs: nonNegativeInteger(raw.runs),
   balls: nonNegativeInteger(raw.balls),
@@ -148,7 +159,8 @@ const normalizeBatsman = (raw = {}) => ({
 });
 
 const normalizeBowler = (raw = {}) => ({
-  name: cleanName(raw.name),
+  name: cleanName(raw.nameSnapshot || raw.name),
+  nameSnapshot: cleanName(raw.nameSnapshot || raw.name),
   playerId: cleanName(raw.playerId || raw._id),
   balls: nonNegativeInteger(raw.balls),
   maidens: nonNegativeInteger(raw.maidens),
@@ -175,11 +187,15 @@ const normalizeInningsState = (rawState, battingTeam = "", bowlingTeam = "") => 
   state.fallOfWickets = Array.isArray(raw.fallOfWickets) ? clone(raw.fallOfWickets) : [];
   state.partnerships = Array.isArray(raw.partnerships) ? clone(raw.partnerships) : [];
   state.lastOverBowler = cleanName(raw.lastOverBowler);
+  state.lastOverBowlerId = cleanName(raw.lastOverBowlerId);
   state.currentBowler = cleanName(raw.currentBowler);
+  state.currentBowlerId = cleanName(raw.currentBowlerId);
   state.overHistory = Array.isArray(raw.overHistory) ? clone(raw.overHistory) : [];
   state.milestones = Array.isArray(raw.milestones)
     ? clone(raw.milestones).filter((item) => item && typeof item === "object").map((item) => ({
       player: cleanName(item.player) || "Unknown",
+      playerId: cleanName(item.playerId),
+      nameSnapshot: cleanName(item.nameSnapshot || item.player) || "Unknown",
       type: cleanName(item.type) || "Achievement",
       over: cleanName(item.over) || "-",
       score: cleanName(item.score) || "-",
@@ -187,6 +203,7 @@ const normalizeInningsState = (rawState, battingTeam = "", bowlingTeam = "") => 
     }))
     : [];
   state.recentBalls = Array.isArray(raw.recentBalls) ? raw.recentBalls.map(String).slice(-12) : [];
+  state.freeHitPending = Boolean(raw.freeHitPending);
   // Older documents receive the schema default (`false`) for this newly-added
   // field even when their legal-ball count proves an over is in progress. Do
   // not let that default unlock an impossible mid-over bowler change.
@@ -243,6 +260,23 @@ const hasMeaningfulLegacyState = (innings) => {
 
 const activeBatters = (state) => state.batsmen.filter((b) => b.isActive && !b.isOut);
 
+const identityReference = (playerId, nameSnapshot) => ({
+  playerId: cleanName(playerId),
+  nameSnapshot: cleanName(nameSnapshot),
+});
+
+const eventParticipant = (event, role = "player") => {
+  if (role === "player") {
+    return identityReference(event.playerId, event.nameSnapshot || event.playerName);
+  }
+  return identityReference(
+    event[`${role}Id`],
+    event[`${role}NameSnapshot`] || event[`${role}Name`],
+  );
+};
+
+const participantName = (value) => normalizeParticipant(value).nameSnapshot;
+
 const fixActiveStrike = (state) => {
   const active = activeBatters(state);
   if (active.length === 0) return;
@@ -253,18 +287,31 @@ const fixActiveStrike = (state) => {
   if (strikers.length > 1) active.forEach((b, index) => { b.isStriker = index === 0; });
 };
 
-const samePartnership = (partnership, names) => {
-  if (!partnership || !Array.isArray(partnership.players) || partnership.players.length !== 2) return false;
-  return partnership.players[0] === names[0] && partnership.players[1] === names[1];
+const samePartnership = (partnership, participants) => {
+  if (!partnership || !Array.isArray(participants) || participants.length !== 2) return false;
+  const stored = Array.isArray(partnership.playerIds) && partnership.playerIds.some(Boolean)
+    ? partnership.playerIds.map((playerId, index) => identityReference(
+      playerId,
+      partnership.nameSnapshots?.[index] || partnership.players?.[index],
+    ))
+    : (partnership.players || []).map((nameSnapshot) => identityReference("", nameSnapshot));
+  return stored.length === 2 && stored.every((participant, index) => sameParticipant(participant, participants[index]));
 };
 
 const ensurePartnership = (state) => {
   const active = activeBatters(state);
   if (active.length !== 2) return;
-  const names = active.map((b) => b.name);
+  const participants = active.map(normalizeParticipant);
   const last = state.partnerships[state.partnerships.length - 1];
-  if (last && !last.isClosed && samePartnership(last, names)) return;
-  state.partnerships.push({ players: names, runs: 0, balls: 0, isClosed: false });
+  if (last && !last.isClosed && samePartnership(last, participants)) return;
+  state.partnerships.push({
+    players: participants.map((participant) => participant.nameSnapshot),
+    playerIds: participants.map((participant) => participant.playerId),
+    nameSnapshots: participants.map((participant) => participant.nameSnapshot),
+    runs: 0,
+    balls: 0,
+    isClosed: false,
+  });
 };
 
 const normalizeWicketType = (value) => {
@@ -453,12 +500,15 @@ const canonicalizeBallEvent = (input = {}) => {
     actionId: cleanName(input.actionId),
     sequence: nonNegativeInteger(input.sequence),
     inningsNumber: nonNegativeInteger(input.inningsNumber || input.inningsNum, 1),
-    batterName: cleanName(input.batterName || input.strikerName),
+    batterName: cleanName(input.batterNameSnapshot || input.batterName || input.strikerName),
     batterId: cleanName(input.batterId),
-    nonStrikerName: cleanName(input.nonStrikerName),
+    batterNameSnapshot: cleanName(input.batterNameSnapshot || input.batterName || input.strikerName),
+    nonStrikerName: cleanName(input.nonStrikerNameSnapshot || input.nonStrikerName),
     nonStrikerId: cleanName(input.nonStrikerId),
-    bowlerName: cleanName(input.bowlerName),
+    nonStrikerNameSnapshot: cleanName(input.nonStrikerNameSnapshot || input.nonStrikerName),
+    bowlerName: cleanName(input.bowlerNameSnapshot || input.bowlerName),
     bowlerId: cleanName(input.bowlerId),
+    bowlerNameSnapshot: cleanName(input.bowlerNameSnapshot || input.bowlerName),
     batsmanRuns,
     extraRuns,
     extraType,
@@ -468,12 +518,16 @@ const canonicalizeBallEvent = (input = {}) => {
     nonDelivery: nonDeliveryDismissal,
     isWicket,
     wicketType,
-    outPlayerName: cleanName(input.outPlayerName || (isWicket ? input.batterName : "")),
+    outPlayerName: cleanName(input.outPlayerNameSnapshot || input.outPlayerName || (isWicket ? (input.batterNameSnapshot || input.batterName) : "")),
     outPlayerId: cleanName(input.outPlayerId),
-    fielderName: cleanName(input.fielderName),
+    outPlayerNameSnapshot: cleanName(input.outPlayerNameSnapshot || input.outPlayerName || (isWicket ? (input.batterNameSnapshot || input.batterName) : "")),
+    fielderName: cleanName(input.fielderNameSnapshot || input.fielderName),
     fielderId: cleanName(input.fielderId),
+    fielderNameSnapshot: cleanName(input.fielderNameSnapshot || input.fielderName),
+    isFreeHit: input.isFreeHit == null ? undefined : Boolean(input.isFreeHit),
     commentary: cleanName(input.commentary).slice(0, 1000),
     symbol: cleanName(input.symbol),
+    rulesVersion: nonNegativeInteger(input.rulesVersion, 2) || 2,
     createdAt: input.createdAt ? new Date(input.createdAt) : new Date(),
   };
 
@@ -500,47 +554,68 @@ const validateBallAgainstState = (state, event) => {
   if (state.isDone) throw new ScoringError("Innings is already complete", 409, "INNINGS_COMPLETE");
   if (adjustment) return;
 
+  if (state.freeHitPending && event.isWicket && !nonDeliveryDismissal) {
+    throw new ScoringError("A delivery wicket cannot be recorded on a free hit", 422, "WICKET_ON_FREE_HIT");
+  }
+
   const active = activeBatters(state);
   if (active.length !== 2) {
     throw new ScoringError("Exactly two active batters are required before scoring", 422, "INVALID_ACTIVE_BATTERS");
   }
-  const striker = active.find((b) => b.name === event.batterName && b.isStriker);
+  const batterReference = eventParticipant(event, "batter");
+  const striker = active.find((batter) => sameParticipant(batter, batterReference) && batter.isStriker);
   if (!striker) throw new ScoringError("Selected striker is not an active batter", 422, "INVALID_STRIKER");
-  const nonStriker = active.find((b) => b.name !== event.batterName);
-  if (!nonStriker || nonStriker.name === striker.name) {
+  const nonStriker = active.find((batter) => !sameParticipant(batter, striker));
+  if (!nonStriker) {
     throw new ScoringError("Striker and non-striker must be different players", 422, "INVALID_BATTER_PAIR");
   }
-  if (event.nonStrikerName && event.nonStrikerName !== nonStriker.name) {
+  const nonStrikerReference = eventParticipant(event, "nonStriker");
+  if ((nonStrikerReference.playerId || nonStrikerReference.nameSnapshot) &&
+      !sameParticipant(nonStriker, nonStrikerReference)) {
     throw new ScoringError("Non-striker does not match the authoritative innings state", 409, "STALE_NON_STRIKER");
   }
-  if (event.isWicket && !active.some((b) => b.name === event.outPlayerName)) {
+  const dismissedReference = eventParticipant(event, "outPlayer");
+  if (event.isWicket && !active.some((batter) => sameParticipant(batter, dismissedReference))) {
     throw new ScoringError("Dismissed player is not an active batter", 422, "INVALID_DISMISSED_BATTER");
   }
-  if (event.isWicket && STRIKER_ONLY_WICKET_TYPES.has(event.wicketType) && event.outPlayerName !== event.batterName) {
+  if (event.isWicket && STRIKER_ONLY_WICKET_TYPES.has(event.wicketType) &&
+      !sameParticipant(dismissedReference, batterReference)) {
     throw new ScoringError("This dismissal can only dismiss the striker", 422, "INVALID_DISMISSED_BATTER");
   }
 
   if (nonDeliveryDismissal) return;
-  const bowler = state.bowlers.find((b) => b.name === event.bowlerName);
+  const bowlerReference = eventParticipant(event, "bowler");
+  const bowler = findParticipant(state.bowlers, bowlerReference);
   if (!bowler) throw new ScoringError("Selected bowler has not been added to this innings", 422, "INVALID_BOWLER");
-  if (active.some((b) => b.name === event.bowlerName)) {
+  if (active.some((batter) => sameParticipant(batter, bowlerReference))) {
     throw new ScoringError("A batting player cannot bowl in the same innings", 422, "INVALID_BOWLER_TEAM");
   }
-  if (state.currentOverStarted && state.currentBowler && state.currentBowler !== event.bowlerName) {
+  const currentBowlerReference = identityReference(state.currentBowlerId, state.currentBowler);
+  if (state.currentOverStarted && (currentBowlerReference.playerId || currentBowlerReference.nameSnapshot) &&
+      !sameParticipant(currentBowlerReference, bowlerReference)) {
     throw new ScoringError("The bowler cannot be changed during an over", 422, "BOWLER_CHANGE_MID_OVER");
   }
 
   const atStartOfOver = state.balls > 0 && state.balls % 6 === 0;
-  if (atStartOfOver && state.lastOverBowler === event.bowlerName) {
+  if (atStartOfOver && sameParticipant(
+    identityReference(state.lastOverBowlerId, state.lastOverBowler),
+    bowlerReference,
+  )) {
     throw new ScoringError("A bowler cannot bowl consecutive overs", 422, "CONSECUTIVE_OVERS");
   }
 };
 
 const addBattingMilestones = (state, batter, event) => {
   for (const threshold of [50, 100]) {
-    if (batter.runs >= threshold && !state.milestones.some((m) => m.player === batter.name && m.type === String(threshold))) {
+    if (batter.runs >= threshold && !state.milestones.some((milestone) =>
+      sameParticipant(
+        identityReference(milestone.playerId, milestone.nameSnapshot || milestone.player),
+        batter,
+      ) && milestone.type === String(threshold))) {
       state.milestones.push({
         player: batter.name,
+        playerId: batter.playerId || "",
+        nameSnapshot: batter.nameSnapshot || batter.name,
         type: String(threshold),
         over: deliveryLabel(Math.max(0, state.balls - (event.legalDelivery ? 1 : 0))),
         score: `${state.runs}/${state.wickets}`,
@@ -552,9 +627,15 @@ const addBattingMilestones = (state, batter, event) => {
 
 const addBowlingMilestones = (state, bowler, event) => {
   for (const threshold of [3, 5]) {
-    if (bowler.wickets >= threshold && !state.milestones.some((m) => m.player === bowler.name && m.type === `${threshold}W`)) {
+    if (bowler.wickets >= threshold && !state.milestones.some((milestone) =>
+      sameParticipant(
+        identityReference(milestone.playerId, milestone.nameSnapshot || milestone.player),
+        bowler,
+      ) && milestone.type === `${threshold}W`)) {
       state.milestones.push({
         player: bowler.name,
+        playerId: bowler.playerId || "",
+        nameSnapshot: bowler.nameSnapshot || bowler.name,
         type: `${threshold}W`,
         over: deliveryLabel(Math.max(0, state.balls - (event.legalDelivery ? 1 : 0))),
         score: `${state.runs}/${state.wickets}`,
@@ -565,14 +646,21 @@ const addBowlingMilestones = (state, bowler, event) => {
 };
 
 const applyAddBatter = (state, event) => {
-  const name = cleanName(event.playerName || event.batterName);
+  const reference = eventParticipant(event, "player");
+  const name = reference.nameSnapshot;
   if (!name) return;
-  let batter = state.batsmen.find((item) => item.name === name);
+  let batter = findParticipant(state.batsmen, reference);
   if (batter?.isOut) return;
 
   const activeBefore = activeBatters(state);
   if (!batter) {
-    batter = normalizeBatsman({ name, playerId: event.playerId, isActive: activeBefore.length < 2, isStriker: false });
+    batter = normalizeBatsman({
+      name,
+      nameSnapshot: name,
+      playerId: reference.playerId,
+      isActive: activeBefore.length < 2,
+      isStriker: false,
+    });
     state.batsmen.push(batter);
   } else if (!batter.isActive && activeBefore.length < 2) {
     batter.isActive = true;
@@ -594,19 +682,22 @@ const applyAddBatter = (state, event) => {
 };
 
 const applyAddBowler = (state, event) => {
-  const name = cleanName(event.playerName || event.bowlerName);
+  const reference = eventParticipant(event, "player");
+  const name = reference.nameSnapshot;
   if (!name) return;
-  if (state.currentOverStarted && state.currentBowler && state.currentBowler !== name) {
+  if (state.currentOverStarted && (state.currentBowlerId || state.currentBowler) &&
+      !sameParticipant(identityReference(state.currentBowlerId, state.currentBowler), reference)) {
     throw new ScoringError("The bowler cannot be changed during an over", 422, "BOWLER_CHANGE_MID_OVER");
   }
-  let bowler = state.bowlers.find((item) => item.name === name);
+  let bowler = findParticipant(state.bowlers, reference);
   if (!bowler) {
-    bowler = normalizeBowler({ name, playerId: event.playerId });
+    bowler = normalizeBowler({ name, nameSnapshot: name, playerId: reference.playerId });
     state.bowlers.push(bowler);
   } else if (!bowler.playerId && event.playerId) {
     bowler.playerId = cleanName(event.playerId);
   }
   state.currentBowler = name;
+  state.currentBowlerId = bowler.playerId || reference.playerId;
 };
 
 const applyCommentary = (state, event) => {
@@ -628,14 +719,20 @@ const applyDelivery = (state, event, replayContext) => {
   const adjustment = event.extraType === "penalty" || event.extraType === "bonus";
   const nonDeliveryDismissal = event.isWicket && NON_DELIVERY_WICKET_TYPES.has(event.wicketType);
   const administrativeAction = adjustment || nonDeliveryDismissal;
+  const authoritativeFreeHit = Boolean(state.freeHitPending);
+  if (event.isFreeHit != null && Boolean(event.isFreeHit) !== authoritativeFreeHit) {
+    throw new ScoringError("Free-hit marker does not match the innings state", 409, "STALE_FREE_HIT_STATE");
+  }
+  event.isFreeHit = authoritativeFreeHit;
   const legalBallsBefore = state.balls;
   const over = nonDeliveryDismissal ? formatOvers(legalBallsBefore) : deliveryLabel(legalBallsBefore);
   const totalRuns = event.batsmanRuns + event.extraRuns;
 
-  let striker = adjustment ? null : state.batsmen.find((b) => b.name === event.batterName && b.isActive && !b.isOut);
-  let nonStriker = adjustment ? null : activeBatters(state).find((b) => b.name !== event.batterName);
+  const batterReference = eventParticipant(event, "batter");
+  let striker = adjustment ? null : activeBatters(state).find((batter) => sameParticipant(batter, batterReference));
+  let nonStriker = adjustment ? null : activeBatters(state).find((batter) => !sameParticipant(batter, batterReference));
   if (!administrativeAction) {
-    activeBatters(state).forEach((b) => { b.isStriker = b.name === event.batterName; });
+    activeBatters(state).forEach((batter) => { batter.isStriker = sameParticipant(batter, batterReference); });
   }
 
   state.runs += totalRuns;
@@ -670,8 +767,9 @@ const applyDelivery = (state, event, replayContext) => {
     if (event.batsmanRuns === 6) striker.sixes += 1;
     addBattingMilestones(state, striker, event);
 
-    bowler = state.bowlers.find((b) => b.name === event.bowlerName);
+    bowler = findParticipant(state.bowlers, eventParticipant(event, "bowler"));
     state.currentBowler = bowler.name;
+    state.currentBowlerId = bowler.playerId || event.bowlerId;
     if (event.legalDelivery) bowler.balls += 1;
     let conceded = event.batsmanRuns;
     if (event.extraType === "wide") conceded += event.extraRuns;
@@ -691,13 +789,14 @@ const applyDelivery = (state, event, replayContext) => {
     if (event.legalDelivery) currentPartnership.balls += 1;
   }
 
-  const postRunStrikerName = event.completedRuns % 2 === 1 ? nonStriker?.name : striker?.name;
-  const postRunNonStrikerName = event.completedRuns % 2 === 1 ? striker?.name : nonStriker?.name;
+  const postRunStriker = event.completedRuns % 2 === 1 ? nonStriker : striker;
+  const postRunNonStriker = event.completedRuns % 2 === 1 ? striker : nonStriker;
   const overComplete = event.legalDelivery && state.balls % 6 === 0;
 
   const countsAsWicket = event.isWicket && !NON_DISMISSAL_TYPES.has(event.wicketType);
   if (event.isWicket) {
-    const dismissed = state.batsmen.find((b) => b.name === event.outPlayerName && b.isActive && !b.isOut);
+    const dismissedReference = eventParticipant(event, "outPlayer");
+    const dismissed = activeBatters(state).find((batter) => sameParticipant(batter, dismissedReference));
     if (dismissed) {
       dismissed.isActive = false;
       dismissed.isOut = countsAsWicket;
@@ -710,6 +809,8 @@ const applyDelivery = (state, event, replayContext) => {
         score: `${state.wickets}-${state.runs}`,
         over,
         player: event.outPlayerName,
+        playerId: event.outPlayerId || dismissed?.playerId || "",
+        nameSnapshot: event.outPlayerNameSnapshot || event.outPlayerName,
         wicketNum: state.wickets,
         eventId: event.actionId,
       });
@@ -720,11 +821,11 @@ const applyDelivery = (state, event, replayContext) => {
     }
     if (currentPartnership) currentPartnership.isClosed = true;
 
-    const candidateName = overComplete ? postRunNonStrikerName : postRunStrikerName;
-    activeBatters(state).forEach((b) => { b.isStriker = b.name === candidateName; });
+    const candidate = overComplete ? postRunNonStriker : postRunStriker;
+    activeBatters(state).forEach((batter) => { batter.isStriker = Boolean(candidate && sameParticipant(batter, candidate)); });
   } else if (!adjustment) {
-    const nextStrikerName = overComplete ? postRunNonStrikerName : postRunStrikerName;
-    activeBatters(state).forEach((b) => { b.isStriker = b.name === nextStrikerName; });
+    const nextStriker = overComplete ? postRunNonStriker : postRunStriker;
+    activeBatters(state).forEach((batter) => { batter.isStriker = Boolean(nextStriker && sameParticipant(batter, nextStriker)); });
   }
 
   state.commentary.unshift({
@@ -739,9 +840,18 @@ const applyDelivery = (state, event, replayContext) => {
     extraType: event.extraType || undefined,
     wicketType: event.wicketType || undefined,
     outPlayerName: event.outPlayerName || undefined,
+    outPlayerId: event.outPlayerId || undefined,
+    outPlayerNameSnapshot: event.outPlayerNameSnapshot || event.outPlayerName || undefined,
     fielderName: event.fielderName || undefined,
+    fielderId: event.fielderId || undefined,
+    fielderNameSnapshot: event.fielderNameSnapshot || event.fielderName || undefined,
     batterName: event.batterName || undefined,
+    batterId: event.batterId || undefined,
+    batterNameSnapshot: event.batterNameSnapshot || event.batterName || undefined,
     bowlerName: event.bowlerName || undefined,
+    bowlerId: event.bowlerId || undefined,
+    bowlerNameSnapshot: event.bowlerNameSnapshot || event.bowlerName || undefined,
+    isFreeHit: event.isFreeHit,
     addedAt: event.createdAt,
   });
   if (!administrativeAction) {
@@ -750,11 +860,21 @@ const applyDelivery = (state, event, replayContext) => {
   }
 
   if (!administrativeAction) {
-    replayContext.currentOver ||= { runs: 0, wickets: 0, extras: 0, bowlerRuns: 0, bowlerName: event.bowlerName };
+    replayContext.currentOver ||= {
+      runs: 0,
+      wickets: 0,
+      extras: 0,
+      bowlerRuns: 0,
+      bowlerName: event.bowlerName,
+      bowlerId: event.bowlerId,
+      bowlerNameSnapshot: event.bowlerNameSnapshot || event.bowlerName,
+    };
     replayContext.currentOver.runs += totalRuns;
     replayContext.currentOver.wickets += event.isWicket && !NON_DISMISSAL_TYPES.has(event.wicketType) ? 1 : 0;
     replayContext.currentOver.extras += event.extraRuns;
     replayContext.currentOver.bowlerName = event.bowlerName;
+    replayContext.currentOver.bowlerId = event.bowlerId;
+    replayContext.currentOver.bowlerNameSnapshot = event.bowlerNameSnapshot || event.bowlerName;
     replayContext.currentOver.bowlerRuns += bowler
       ? event.batsmanRuns +
         (event.extraType === "wide" ? event.extraRuns : 0) +
@@ -763,19 +883,39 @@ const applyDelivery = (state, event, replayContext) => {
   }
 
   if (overComplete) {
-    const overData = replayContext.currentOver || { runs: 0, wickets: 0, extras: 0, bowlerRuns: 0, bowlerName: event.bowlerName };
-    state.overHistory.push({
+    const overData = replayContext.currentOver || {
+      runs: 0,
+      wickets: 0,
+      extras: 0,
+      bowlerRuns: 0,
+      bowlerName: event.bowlerName,
+      bowlerId: event.bowlerId,
+      bowlerNameSnapshot: event.bowlerNameSnapshot || event.bowlerName,
+    };
+    const overRecord = {
       over: Math.floor(state.balls / 6),
       runs: nonNegativeInteger(overData.runs),
       wickets: nonNegativeInteger(overData.wickets),
       extras: nonNegativeInteger(overData.extras),
       bowlerName: cleanName(overData.bowlerName),
-    });
+    };
+    if (cleanName(overData.bowlerId)) {
+      overRecord.bowlerId = cleanName(overData.bowlerId);
+      overRecord.bowlerNameSnapshot = cleanName(overData.bowlerNameSnapshot || overData.bowlerName);
+    }
+    state.overHistory.push(overRecord);
     if (!replayContext.legacyPartialOver && overData.bowlerRuns === 0 && bowler) bowler.maidens += 1;
     state.lastOverBowler = event.bowlerName;
+    state.lastOverBowlerId = bowler?.playerId || event.bowlerId;
     state.currentOverStarted = false;
     replayContext.currentOver = null;
     replayContext.legacyPartialOver = false;
+  }
+
+  if (!administrativeAction) {
+    if (!replayContext.freeHitEnabled) state.freeHitPending = false;
+    else if (event.extraType === "noBall") state.freeHitPending = true;
+    else if (event.legalDelivery) state.freeHitPending = false;
   }
 
   fixActiveStrike(state);
@@ -783,6 +923,7 @@ const applyDelivery = (state, event, replayContext) => {
 
 const applyEndInnings = (state, event) => {
   state.isDone = true;
+  state.freeHitPending = false;
   state.endReason = cleanName(event.reason) || "declared";
   state.commentary.unshift({
     eventId: event.actionId,
@@ -803,6 +944,7 @@ const rebuildInnings = ({
   maxWickets = 10,
   maxBalls = null,
   target = null,
+  freeHitEnabled = true,
 } = {}) => {
   const state = normalizeInningsState(baseline, battingTeam, bowlingTeam);
   state.battingTeam = cleanName(battingTeam || state.battingTeam);
@@ -813,10 +955,12 @@ const rebuildInnings = ({
   state.isDone = Boolean(state.isDone);
   state.endReason = state.isDone ? (state.endReason || "legacyClosed") : "";
   state.recentBalls = [];
+  if (!freeHitEnabled) state.freeHitPending = false;
 
   const replayContext = {
     currentOver: null,
     legacyPartialOver: Boolean(baseline && state.balls % 6 !== 0),
+    freeHitEnabled: Boolean(freeHitEnabled),
   };
 
   const orderedEvents = Array.isArray(events) ? events.map((event) => clone(asObject(event))).filter(Boolean) : [];
@@ -843,6 +987,7 @@ const rebuildInnings = ({
     state.isDone = true;
     state.endReason = "targetReached";
   }
+  if (state.isDone) state.freeHitPending = false;
 
   validateInningsInvariants(state, { maxWickets });
   return state;
@@ -864,8 +1009,10 @@ const validateInningsInvariants = (state, { maxWickets = 10 } = {}) => {
   }
   const active = activeBatters(state);
   if (active.length > 2) throw new ScoringError("More than two active batters", 422, "INVARIANT_VIOLATION");
-  const names = new Set(active.map((b) => b.name));
-  if (names.size !== active.length) throw new ScoringError("Striker and non-striker must be different", 422, "INVARIANT_VIOLATION");
+  const identities = new Set(active.map(participantKey));
+  if (identities.has("") || identities.size !== active.length) {
+    throw new ScoringError("Striker and non-striker must be different", 422, "INVARIANT_VIOLATION");
+  }
   if (active.length === 2 && active.filter((b) => b.isStriker).length !== 1) {
     throw new ScoringError("Exactly one active batter must be on strike", 422, "INVARIANT_VIOLATION");
   }
@@ -889,11 +1036,14 @@ const createControlEvent = (type, input = {}) => {
     actionId: cleanName(input.actionId),
     sequence: nonNegativeInteger(input.sequence),
     inningsNumber: nonNegativeInteger(input.inningsNumber || input.inningsNum, 1),
-    playerName: cleanName(input.playerName || input.name),
+    playerName: cleanName(input.nameSnapshot || input.playerName || input.name),
+    playerId: cleanName(input.playerId),
+    nameSnapshot: cleanName(input.nameSnapshot || input.playerName || input.name),
     isStriker: typeof input.isStriker === "boolean" ? input.isStriker : undefined,
     reason: cleanName(input.reason),
     commentary: cleanName(input.commentary || input.text).slice(0, 1000),
     over: cleanName(input.over),
+    rulesVersion: nonNegativeInteger(input.rulesVersion, 2) || 2,
     createdAt: input.createdAt ? new Date(input.createdAt) : new Date(),
   };
 };
@@ -909,7 +1059,9 @@ const deriveMatchState = (match, { maxWickets = 10, maxBalls = null } = {}) => {
     match.requiredRunRate = 0;
     match.recentBalls = [];
     match.currentBatsmen = [];
+    match.currentBatsmenIds = [];
     match.currentBowler = "";
+    match.currentBowlerId = "";
     return match;
   }
 
@@ -953,7 +1105,9 @@ const deriveMatchState = (match, { maxWickets = 10, maxBalls = null } = {}) => {
   const current = match.currentInnings === 2 ? match.innings2 : match.innings1;
   match.recentBalls = Array.isArray(current?.recentBalls) ? current.recentBalls.slice(-12) : [];
   match.currentBatsmen = current ? activeBatters(current).map((b) => b.name) : [];
+  match.currentBatsmenIds = current ? activeBatters(current).map((b) => b.playerId || "") : [];
   match.currentBowler = cleanName(current?.currentBowler);
+  match.currentBowlerId = cleanName(current?.currentBowlerId);
   return match;
 };
 

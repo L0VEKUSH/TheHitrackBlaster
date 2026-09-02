@@ -32,9 +32,12 @@ const api = axios.create({
 // Uncomment the following line if backend uses cookie-based auth:
 // api.defaults.withCredentials = true;
 
-// Attach token automatically
+// Attach token automatically - use admin token if available, otherwise user token
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("cs_token");
+  // Try admin token first (admin operations take precedence), then user token
+  const adminToken = localStorage.getItem("cs_admin_token");
+  const userToken = localStorage.getItem("cs_user_token");
+  const token = adminToken || userToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
 
   if (config && typeof config.url === "string") {
@@ -55,8 +58,10 @@ api.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem("cs_token");
+      localStorage.removeItem("cs_user_token");
+      localStorage.removeItem("cs_admin_token");
       localStorage.removeItem("cs_user");
+      localStorage.removeItem("cs_admin");
     }
     return Promise.reject(err);
   }
@@ -71,6 +76,7 @@ export const matchAPI = {
   getById:       (id, config)   => api.get(`/matches/${id}`, config),
   create:        (data)         => api.post("/matches", data),
   update:        (id, data)     => api.put(`/matches/${id}`, data),
+  updatePlayingXI: (id, data)   => api.put(`/matches/${id}/playing-xi`, data),
   remove:        (id)           => api.delete(`/matches/${id}`),
   setToss:       (id, data)     => api.post(`/matches/${id}/toss`, data),
   getAIPredictions: (id, config = {}) => api.get(`/matches/${id}/ai-predictions`, config),

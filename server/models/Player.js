@@ -106,13 +106,16 @@ const playerSchema = new mongoose.Schema({
 
   rankings: {
     t20Batting:  { type: Number, default: 0 },
-    odiBatting:  { type: Number, default: 0 },
-    testBatting: { type: Number, default: 0 },
     t20Bowling:  { type: Number, default: 0 },
+    t20AllRounder: { type: Number, default: 0 },
+    odiBatting:  { type: Number, default: 0 },
     odiBowling:  { type: Number, default: 0 },
+    odiAllRounder: { type: Number, default: 0 },
+    rmcBatting:  { type: Number, default: 0 },
+    rmcBowling:  { type: Number, default: 0 },
+    rmcAllRounder: { type: Number, default: 0 },
+    testBatting: { type: Number, default: 0 },
     testBowling: { type: Number, default: 0 },
-    t20AllRounder:  { type: Number, default: 0 },
-    odiAllRounder:  { type: Number, default: 0 },
     testAllRounder: { type: Number, default: 0 }
   }
 }, { timestamps: true });

@@ -8,7 +8,10 @@ import Spinner from "../../components/common/Spinner";
 import AutocompleteInput from "../../components/common/AutocompleteInput";
 import { BattingTable, BowlingTable } from "../../components/match/ScoreBoard";
 import { getActiveInnings } from "../../utils/matchSelectors";
-import { getWicketTypesForExtra } from "../../utils/scoringRules";
+import {
+  getWicketTypesForExtra,
+  isNonDeliveryWicketType,
+} from "../../utils/scoringRules";
 
 const createActionId = (operation) => {
   const nonce = globalThis.crypto?.randomUUID?.()
@@ -24,9 +27,83 @@ const getStateVersion = (match) => {
 const STRIKER_ONLY_WICKET_TYPES = new Set([
   "bowled", "caught", "lbw", "stumped", "hitWicket", "hitBallTwice",
 ]);
-const NON_DELIVERY_WICKET_TYPES = new Set(["retiredHurt", "retiredOut", "timedOut"]);
 const FIELDER_REQUIRED_WICKET_TYPES = new Set(["caught", "stumped", "runOut"]);
 const POSITIVE_VALUE_EXTRA_TYPES = new Set(["bye", "legBye", "penalty", "bonus"]);
+const OBJECT_ID_PATTERN = /^[a-f\d]{24}$/i;
+
+const cleanText = (value) => String(value == null ? "" : value).trim();
+
+const playerIdOf = (player) => {
+  if (!player || typeof player !== "object") return "";
+  const rawId = player.playerId ?? player._id ?? player.id;
+  if (rawId && typeof rawId === "object") {
+    return cleanText(rawId._id ?? rawId.id);
+  }
+  return cleanText(rawId);
+};
+
+const playerNameOf = (player) => {
+  if (!player || typeof player !== "object") return "";
+  return cleanText(
+    player.nameSnapshot ??
+    player.name ??
+    player.playerName ??
+    (typeof player.playerId === "object" ? player.playerId?.name : "") ??
+    player.player?.name,
+  );
+};
+
+const normalizeRosterEntry = (entry) => {
+  if (typeof entry === "string") {
+    const value = cleanText(entry);
+    return OBJECT_ID_PATTERN.test(value)
+      ? { _id: value, playerId: value, name: "", role: "", photo: "" }
+      : { _id: "", playerId: "", name: value, role: "", photo: "", isLegacyName: true };
+  }
+
+  const source = entry && typeof entry === "object" ? entry : {};
+  const populatedPlayer = source.player && typeof source.player === "object"
+    ? source.player
+    : source.playerId && typeof source.playerId === "object"
+      ? source.playerId
+      : {};
+  const playerId = playerIdOf(source) || playerIdOf(populatedPlayer);
+  return {
+    ...populatedPlayer,
+    ...source,
+    _id: playerId,
+    playerId,
+    name: playerNameOf(source) || playerNameOf(populatedPlayer),
+    role: source.role || populatedPlayer.role || "",
+    photo: source.photo || populatedPlayer.photo || "",
+  };
+};
+
+const playingXIEntries = (selection) => {
+  if (Array.isArray(selection)) return selection;
+  return Array.isArray(selection?.playingXI) ? selection.playingXI : [];
+};
+
+const sameParticipant = (left, right) => {
+  const leftId = playerIdOf(left);
+  const rightId = playerIdOf(right);
+  if (leftId && rightId) return leftId === rightId;
+  const leftName = playerNameOf(left).toLocaleLowerCase();
+  const rightName = playerNameOf(right).toLocaleLowerCase();
+  return Boolean(leftName && rightName && leftName === rightName);
+};
+
+const dedupeRoster = (players) => {
+  const seen = new Set();
+  return players.filter((player) => {
+    const playerId = playerIdOf(player);
+    const name = playerNameOf(player);
+    const key = playerId ? `id:${playerId}` : `name:${name.toLocaleLowerCase()}`;
+    if (!name || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
 
 export default function AdminLiveScoring() {
   const { id }  = useParams();
@@ -64,14 +141,19 @@ export default function AdminLiveScoring() {
   const statistics = match?.statistics ?? {};
   const inningsNum = Number(match?.currentInnings) === 2 ? 2 : 1;
   const inn = getActiveInnings(match);
-  const striker = (inn?.batsmen || []).find((batter) =>
+  const activeInningsBatters = (inn?.batsmen || []).filter((batter) =>
+    !batter.isOut && batter.isActive !== false);
+  const striker = activeInningsBatters.find((batter) =>
     batter.isStriker && !batter.isOut && batter.isActive !== false);
+  const nonStriker = activeInningsBatters.find((batter) => !sameParticipant(batter, striker));
   const batterName = striker?.name || "";
   const recentBalls = Array.isArray(match?.recentBalls)
     ? match.recentBalls
     : (inn?.recentBalls || []);
   const squadAKey = (match?.squadA || []).join("\u0001");
   const squadBKey = (match?.squadB || []).join("\u0001");
+  const teamAPlayingXIKey = JSON.stringify(playingXIEntries(match?.teamAPlayingXI));
+  const teamBPlayingXIKey = JSON.stringify(playingXIEntries(match?.teamBPlayingXI));
   
   // Rosters
   const [rosterA, setRosterA] = useState([]);
@@ -81,6 +163,7 @@ export default function AdminLiveScoring() {
   // Wicket Dialog
   const [showWicketModal, setShowWicketModal] = useState(false);
   const [outPlayer, setOutPlayer] = useState("");
+  const [outPlayerId, setOutPlayerId] = useState("");
   const [selectedMoM, setSelectedMoM] = useState("");
 
   // Poll
@@ -105,6 +188,7 @@ export default function AdminLiveScoring() {
   const resetWicketDraft = () => {
     setShowWicketModal(false);
     setOutPlayer("");
+    setOutPlayerId("");
     setWicketType("caught");
     setWicketRuns(0);
     setFielderName("");
@@ -284,25 +368,99 @@ export default function AdminLiveScoring() {
     let active = true;
     const squadA = match.squadA || [];
     const squadB = match.squadB || [];
+    const teamAPlayingXI = playingXIEntries(match.teamAPlayingXI);
+    const teamBPlayingXI = playingXIEntries(match.teamBPlayingXI);
 
-    const loadRoster = async (team, squad, setter) => {
-      if (squad.length > 0) {
-        setter(squad.map((name) => ({ _id: "", name, role: "", photo: "" })));
+    const loadRoster = async (team, selectedPlayingXI, squad, setter) => {
+      const playingSeeds = selectedPlayingXI.map(normalizeRosterEntry).filter((player) => (
+        playerIdOf(player) || playerNameOf(player)
+      ));
+
+      if (playingSeeds.length > 0) {
+        // Render any snapshots immediately, then enrich ID-backed entries with
+        // the current Player record for photos and roles. The selected XI is
+        // authoritative; substitutes and broader squad members are excluded.
+        setter(dedupeRoster(playingSeeds));
+        let teamPlayers = [];
+        try {
+          const response = await playerAPI.getAll({ team, limit: 100 });
+          teamPlayers = Array.isArray(response.data?.players) ? response.data.players : [];
+        } catch (rosterError) {
+          if (active) console.error(`Unable to enrich ${team}'s Playing XI:`, rosterError.message);
+        }
+
+        const playersById = new Map(teamPlayers.map((player) => [playerIdOf(player), player]));
+        const unresolvedIds = [...new Set(
+          playingSeeds.map(playerIdOf).filter((playerId) => playerId && !playersById.has(playerId)),
+        )];
+        const fetchedById = new Map();
+        await Promise.all(unresolvedIds.map(async (playerId) => {
+          try {
+            const response = await playerAPI.getById(playerId);
+            const player = response.data?.player;
+            if (player) fetchedById.set(playerId, player);
+          } catch (rosterError) {
+            if (active) console.error(`Unable to resolve Playing XI player ${playerId}:`, rosterError.message);
+          }
+        }));
+
+        const teamPlayersByName = new Map();
+        for (const player of teamPlayers) {
+          const key = playerNameOf(player).toLocaleLowerCase();
+          if (!key) continue;
+          const matches = teamPlayersByName.get(key) || [];
+          matches.push(player);
+          teamPlayersByName.set(key, matches);
+        }
+
+        const resolved = playingSeeds.map((seed) => {
+          const playerId = playerIdOf(seed);
+          const nameMatches = teamPlayersByName.get(playerNameOf(seed).toLocaleLowerCase()) || [];
+          const details = playersById.get(playerId) || fetchedById.get(playerId) ||
+            (!playerId && nameMatches.length === 1 ? nameMatches[0] : null);
+          const resolvedId = playerId || playerIdOf(details);
+          return {
+            ...(details || {}),
+            ...seed,
+            _id: resolvedId,
+            playerId: resolvedId,
+            name: playerNameOf(seed) || playerNameOf(details),
+            role: seed.role || details?.role || "",
+            photo: seed.photo || details?.photo || "",
+          };
+        });
+        if (active) setter(dedupeRoster(resolved));
         return;
       }
+
+      if (squad.length > 0) {
+        // Legacy matches remain viewable/selectable by their historical squad
+        // names, but ID-backed Playing XI data always wins when it exists.
+        setter(dedupeRoster(squad.map(normalizeRosterEntry)));
+        return;
+      }
+
       setter([]);
       try {
-        const response = await playerAPI.getAll({ team, limit: 50 });
-        if (active) setter(response.data.players || []);
+        const response = await playerAPI.getAll({ team, limit: 100 });
+        if (active) setter(dedupeRoster(response.data?.players || []));
       } catch (rosterError) {
         if (active) console.error(`Unable to load ${team} roster:`, rosterError.message);
       }
     };
 
-    void loadRoster(match.teamA, squadA, setRosterA);
-    void loadRoster(match.teamB, squadB, setRosterB);
+    void loadRoster(match.teamA, teamAPlayingXI, squadA, setRosterA);
+    void loadRoster(match.teamB, teamBPlayingXI, squadB, setRosterB);
     return () => { active = false; };
-  }, [match?._id, match?.teamA, match?.teamB, squadAKey, squadBKey]);
+  }, [
+    match?._id,
+    match?.teamA,
+    match?.teamB,
+    squadAKey,
+    squadBKey,
+    teamAPlayingXIKey,
+    teamBPlayingXIKey,
+  ]);
 
   useEffect(() => {
     if (match) {
@@ -350,13 +508,23 @@ export default function AdminLiveScoring() {
     }
     const isAdjustment = type === "bonus" || type === "penalty";
     const resolvedWicketType = wType || (wkt ? wicketType : "");
-    const isNonDeliveryWicket = wkt && NON_DELIVERY_WICKET_TYPES.has(resolvedWicketType);
+    const isNonDeliveryWicket = wkt && isNonDeliveryWicketType(resolvedWicketType);
     const resolvedFielderName = String(fName || (wkt ? fielderName : "")).trim();
+    const resolvedFielderId = cleanText(fId || (wkt ? fielderId : ""));
+    const authoritativeInnings = getActiveInnings(matchRef.current);
+    const authoritativeFreeHitPending = Boolean(authoritativeInnings?.freeHitPending);
     if (POSITIVE_VALUE_EXTRA_TYPES.has(type) && runs < 1) {
       return flash("The selected extra must add at least one run.");
     }
     if (isAdjustment && wkt) {
       return flash("Penalty and bonus adjustments cannot include a wicket.");
+    }
+    if (isNonDeliveryWicket && type) {
+      return flash("Administrative dismissals cannot be combined with a delivery extra.");
+    }
+    if (authoritativeFreeHitPending && wkt && !isNonDeliveryWicket) {
+      resetWicketDraft();
+      return flash("FREE HIT: a delivery wicket cannot be submitted.");
     }
     if (!isAdjustment && !batterName) return flash("⚠️ Select a striker first!");
     if (!isAdjustment && !isNonDeliveryWicket && !bowlerName) return flash("⚠️ Select a bowler!");
@@ -366,20 +534,27 @@ export default function AdminLiveScoring() {
     if (wkt && FIELDER_REQUIRED_WICKET_TYPES.has(resolvedWicketType) && !resolvedFielderName) {
       return flash("Select or enter the fielder before confirming the dismissal.");
     }
+    if (wkt && FIELDER_REQUIRED_WICKET_TYPES.has(resolvedWicketType) && !resolvedFielderId) {
+      return flash("Select the fielder from the player suggestions to confirm their identity.");
+    }
     const selectedBowler = (inn?.bowlers || []).find((bowler) => bowler.name === bowlerName);
-    const dismissedBatter = (inn?.batsmen || []).find((batter) => batter.name === dismissedPlayer);
+    const dismissedBatter = (inn?.batsmen || []).find((batter) => (
+      outPlayerId ? playerIdOf(batter) === outPlayerId : batter.name === dismissedPlayer
+    ));
 
     await runMatchMutation(
       "SCORE_BALL",
       (metadata) => matchAPI.updateScore(id, {
         inningsNum, runs, isWicket: wkt, extraType: type,
-        batterName, batterId: striker?.playerId || "",
-        bowlerName, bowlerId: selectedBowler?.playerId || "",
-        outPlayerName: dismissedPlayer, outPlayerId: dismissedBatter?.playerId || "",
+        batterName, batterId: playerIdOf(striker),
+        nonStrikerName: nonStriker?.name || "",
+        nonStrikerId: playerIdOf(nonStriker),
+        bowlerName, bowlerId: playerIdOf(selectedBowler),
+        outPlayerName: dismissedPlayer, outPlayerId: playerIdOf(dismissedBatter),
         commentary: commentary || "",
         wicketType: resolvedWicketType || null,
         fielderName: resolvedFielderName || null,
-        fielderId: fId || (wkt ? fielderId : ""),
+        fielderId: resolvedFielderId,
         ...metadata,
       }),
       {
@@ -490,22 +665,25 @@ export default function AdminLiveScoring() {
     );
   };
 
-  const addFromRoster = async (playerOrName, type) => {
+  const addFromRoster = async (playerOrName, type, { requirePlayerId = false } = {}) => {
     const player = typeof playerOrName === "object" && playerOrName !== null
       ? playerOrName
       : { name: playerOrName };
-    const name = player.name?.trim();
-    const playerId = String(player._id || player.playerId || "");
+    const name = playerNameOf(player);
+    const playerId = playerIdOf(player);
     if (match?.status === "completed") return flash("⚠️ Match is completed!");
     if (match?.status !== "live" || !inn) return flash("⚠️ Start the match before selecting players.");
     if (!name) return flash(`⚠️ Select a ${type === "bat" ? "batsman" : "bowler"} first.`);
-    const existingBatter = (inn.batsmen || []).find((batter) => batter.name === name);
+    if (requirePlayerId && !playerId) {
+      return flash(`Select the ${type === "bat" ? "batsman" : "bowler"} from the suggestions to confirm their identity.`);
+    }
+    const existingBatter = (inn.batsmen || []).find((batter) => sameParticipant(batter, player));
     if (type === "bat" && existingBatter) {
       return flash(existingBatter.isOut
         ? "⚠️ A dismissed batter cannot return."
         : "⚠️ That batter is already active.");
     }
-    if (type === "bwl" && (inn.batsmen || []).some((batter) => batter.name === name)) {
+    if (type === "bwl" && (inn.batsmen || []).some((batter) => sameParticipant(batter, player))) {
       return flash("⚠️ A batting-team player cannot be selected as bowler.");
     }
     const operation = type === "bat" ? "ADD_BATTER" : "ADD_BOWLER";
@@ -581,7 +759,7 @@ export default function AdminLiveScoring() {
   }
 
   const overs = inn?.balls ? `${Math.floor(inn.balls/6)}.${inn.balls%6}` : "0.0";
-  const activeBatsmen = (inn?.batsmen || []).filter(b => !b.isOut && b.isActive !== false);
+  const activeBatsmen = activeInningsBatters;
   const currentBattingTeam = inn?.battingTeam;
   const currentBowlingTeam = currentBattingTeam === match.teamA ? match.teamB : match.teamA;
   const currentBattingRoster = currentBattingTeam === match.teamA ? rosterA : currentBattingTeam === match.teamB ? rosterB : rosterA;
@@ -597,9 +775,10 @@ export default function AdminLiveScoring() {
   const scoreInputsReady = inningsIsOpen && activeBatsmen.length === 2 && Boolean(batterName && bowlerName);
   const adjustmentSelected = extraMRMCfier === "bonus" || extraMRMCfier === "penalty";
   const quickScoreReady = adjustmentSelected ? inningsIsOpen : scoreInputsReady;
-  const availableWicketTypes = getWicketTypesForExtra(extraMRMCfier);
+  const freeHitPending = Boolean(inn?.freeHitPending);
+  const availableWicketTypes = getWicketTypesForExtra(extraMRMCfier, { freeHitPending });
   const wicketMayIncludeRuns = ["runOut", "obstructingField", "hitBallTwice"].includes(wicketType);
-  const wicketIsNonDelivery = NON_DELIVERY_WICKET_TYPES.has(wicketType);
+  const wicketIsNonDelivery = isNonDeliveryWicketType(wicketType);
   const wicketNeedsFielder = FIELDER_REQUIRED_WICKET_TYPES.has(wicketType);
   const eligibleDismissedBatsmen = STRIKER_ONLY_WICKET_TYPES.has(wicketType)
     ? activeBatsmen.filter((batter) => batter.name === batterName)
@@ -607,7 +786,9 @@ export default function AdminLiveScoring() {
   const wicketSelectionReady = Boolean(
     outPlayer &&
     (!wicketNeedsFielder || fielderName.trim()) &&
-    (wicketIsNonDelivery || bowlerName),
+    (!wicketNeedsFielder || fielderId) &&
+    (wicketIsNonDelivery || bowlerName) &&
+    (!freeHitPending || wicketIsNonDelivery),
   );
   const inningsBallLimit = (match.isSuperOver ? 1 : Number(match.overs || 0)) * 6;
   const inningsOverLimit = match.isSuperOver ? 1 : match.overs;
@@ -618,11 +799,22 @@ export default function AdminLiveScoring() {
     ? Math.max(0, (match.target || 0) - (inn?.runs || 0))
     : Math.max(0, Number(match.requiredRuns) || 0);
   const openWicketModal = () => {
+    if (availableWicketTypes.length === 0) {
+      return flash(freeHitPending
+        ? "FREE HIT: clear the delivery extra to record an administrative dismissal."
+        : "No dismissal is available for the selected scoring action.");
+    }
     const selectedType = availableWicketTypes.includes(wicketType)
       ? wicketType
       : availableWicketTypes[0];
     setWicketType(selectedType);
-    setOutPlayer(STRIKER_ONLY_WICKET_TYPES.has(selectedType) ? batterName : "");
+    if (STRIKER_ONLY_WICKET_TYPES.has(selectedType)) {
+      setOutPlayer(batterName);
+      setOutPlayerId(playerIdOf(striker));
+    } else {
+      setOutPlayer("");
+      setOutPlayerId("");
+    }
     setShowWicketModal(true);
   };
 
@@ -750,6 +942,30 @@ export default function AdminLiveScoring() {
           </div>
         </div>
       </div>
+
+      {freeHitPending && (
+        <motion.div
+          role="status"
+          aria-live="polite"
+          initial={{ opacity: 0, scale: 0.98 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="relative overflow-hidden rounded-3xl border-2 border-yellow-200 bg-yellow-400 px-6 py-5 text-black shadow-[0_0_40px_rgba(250,204,21,0.35)]"
+        >
+          <div className="absolute inset-0 animate-pulse bg-white/15" />
+          <div className="relative flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-4">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-black text-xl font-black text-yellow-300">FH</span>
+              <div>
+                <div className="text-3xl font-black italic uppercase tracking-tight">Free Hit</div>
+                <div className="text-xs font-bold uppercase tracking-widest text-black/65">Delivery wickets are disabled for this ball</div>
+              </div>
+            </div>
+            <div className="rounded-xl bg-black/10 px-4 py-2 text-[10px] font-black uppercase tracking-widest">
+              Authoritative innings state
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       {/* Bonus & Penalty Quick Actions */}
       <div className="grid grid-cols-2 gap-4">
@@ -968,7 +1184,7 @@ export default function AdminLiveScoring() {
                       value={newBatsman}
                       disabled={saving || !inningsIsOpen}
                       onChange={(value) => { setNewBatsman(value); setNewBatsmanId(""); }}
-                      onSelect={p => { setNewBatsman(p.name); setNewBatsmanId(p._id || p.playerId || ""); }}
+                      onSelect={p => { setNewBatsman(playerNameOf(p)); setNewBatsmanId(playerIdOf(p)); }}
                       fetchFn={async q => {
                         const localHits = (currentBattingRoster || []).filter((p) =>
                           p?.name?.toLowerCase().includes((q || "").toLowerCase())
@@ -990,8 +1206,12 @@ export default function AdminLiveScoring() {
                       minChars={1}
                     />
                     <button
-                      disabled={saving || !inningsIsOpen || !newBatsman.trim()}
-                      onClick={() => { void addFromRoster({ name: newBatsman, _id: newBatsmanId }, 'bat'); }}
+                      disabled={saving || !inningsIsOpen || !newBatsman.trim() || !newBatsmanId}
+                      onClick={() => { void addFromRoster(
+                        { name: newBatsman, _id: newBatsmanId },
+                        'bat',
+                        { requirePlayerId: true },
+                      ); }}
                       className="btn-primary px-4 rounded-xl shrink-0 h-[38px] text-xs disabled:opacity-40"
                     >ADD</button>
                   </div>
@@ -1040,7 +1260,7 @@ export default function AdminLiveScoring() {
                   value={newBowler}
                   disabled={saving || !canChangeBowler}
                   onChange={(value) => { setNewBowler(value); setNewBowlerId(""); }}
-                  onSelect={p => { setNewBowler(p.name); setNewBowlerId(p._id || p.playerId || ""); }}
+                  onSelect={p => { setNewBowler(playerNameOf(p)); setNewBowlerId(playerIdOf(p)); }}
                   fetchFn={async q => {
                     const localHits = (currentBowlingRoster || []).filter((p) =>
                       p?.name?.toLowerCase().includes((q || "").toLowerCase())
@@ -1062,8 +1282,12 @@ export default function AdminLiveScoring() {
                   minChars={1}
                 />
                 <button
-                  disabled={saving || !canChangeBowler || !newBowler.trim()}
-                  onClick={() => { void addFromRoster({ name: newBowler, _id: newBowlerId }, 'bwl'); }}
+                  disabled={saving || !canChangeBowler || !newBowler.trim() || !newBowlerId}
+                  onClick={() => { void addFromRoster(
+                    { name: newBowler, _id: newBowlerId },
+                    'bwl',
+                    { requirePlayerId: true },
+                  ); }}
                   className="bg-blue-600 text-white px-4 rounded-xl text-xs font-bold shrink-0 h-[38px] disabled:opacity-40"
                 >ADD</button>
               </div>
@@ -1103,7 +1327,15 @@ export default function AdminLiveScoring() {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-6 gap-4 mb-10">
-               <button disabled={saving || !inningsIsOpen || activeBatsmen.length !== 2 || !batterName || adjustmentSelected} onClick={openWicketModal} className="sm:col-span-2 h-16 rounded-2xl bg-red-600 text-white font-black text-sm shadow-xl shadow-red-900/40 hover:bg-red-500 transition-all uppercase tracking-widest disabled:opacity-30">WICKET / OUT</button>
+               <button
+                 disabled={saving || !inningsIsOpen || activeBatsmen.length !== 2 || !batterName || adjustmentSelected || availableWicketTypes.length === 0}
+                 onClick={openWicketModal}
+                 className={`sm:col-span-2 h-16 rounded-2xl font-black text-sm shadow-xl transition-all uppercase tracking-widest disabled:opacity-30 ${
+                   freeHitPending
+                     ? "bg-yellow-400 text-black shadow-yellow-900/20 hover:bg-yellow-300"
+                     : "bg-red-600 text-white shadow-red-900/40 hover:bg-red-500"
+                 }`}
+               >{freeHitPending ? "ADMIN OUT ONLY" : "WICKET / OUT"}</button>
                <button disabled={saving || !inningsIsOpen} onClick={() => setExtraMRMCfier(m => m === "wide" ? "" : "wide")} className={`h-16 rounded-2xl text-[10px] font-black uppercase transition-all disabled:opacity-30 ${extraMRMCfier === "wide" ? "bg-white text-black shadow-xl" : "bg-gray-800 text-gray-400 border border-white/5 hover:bg-gray-700"}`}>WIDE</button>
                <button disabled={saving || !inningsIsOpen} onClick={() => setExtraMRMCfier(m => m === "noBall" ? "" : "noBall")} className={`h-16 rounded-2xl text-[10px] font-black uppercase transition-all disabled:opacity-30 ${extraMRMCfier === "noBall" ? "bg-white text-black shadow-xl" : "bg-gray-800 text-gray-400 border border-white/5 hover:bg-gray-700"}`}>NO BALL</button>
                <button disabled={saving || !inningsIsOpen} onClick={() => setExtraMRMCfier(m => m === "bye" ? "" : "bye")} className={`h-16 rounded-2xl text-[10px] font-black uppercase transition-all disabled:opacity-30 ${extraMRMCfier === "bye" ? "bg-white text-black shadow-xl" : "bg-gray-800 text-gray-400 border border-white/5 hover:bg-gray-700"}`}>BYE</button>
@@ -1231,9 +1463,14 @@ export default function AdminLiveScoring() {
                 <label className="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em] mb-4 block">Dismissed Player</label>
                 <div className="grid grid-cols-2 gap-4">
                   {eligibleDismissedBatsmen.map(b => (
-                    <button key={b.name} disabled={saving} onClick={() => setOutPlayer(b.name)}
+                    <button key={playerIdOf(b) || b.name} disabled={saving} onClick={() => {
+                      setOutPlayer(b.name);
+                      setOutPlayerId(playerIdOf(b));
+                    }}
                       className={`py-5 rounded-3xl text-sm font-black transition-all disabled:opacity-30 ${
-                        outPlayer === b.name ? "bg-red-600 text-white shadow-xl shadow-red-900/40 scale-105" : "bg-white/5 text-gray-500 hover:bg-white/10"
+                        outPlayer === b.name && (!outPlayerId || outPlayerId === playerIdOf(b))
+                          ? "bg-red-600 text-white shadow-xl shadow-red-900/40 scale-105"
+                          : "bg-white/5 text-gray-500 hover:bg-white/10"
                       }`}>{b.name.split(' ')[0]}</button>
                   ))}
                 </div>
@@ -1245,7 +1482,10 @@ export default function AdminLiveScoring() {
                   {availableWicketTypes.map(t => (
                     <button key={t} disabled={saving} onClick={() => {
                       setWicketType(t);
-                      if (STRIKER_ONLY_WICKET_TYPES.has(t)) setOutPlayer(batterName);
+                      if (STRIKER_ONLY_WICKET_TYPES.has(t)) {
+                        setOutPlayer(batterName);
+                        setOutPlayerId(playerIdOf(striker));
+                      }
                       if (!["runOut", "obstructingField", "hitBallTwice"].includes(t)) setWicketRuns(0);
                       if (!FIELDER_REQUIRED_WICKET_TYPES.has(t)) {
                         setFielderName("");
@@ -1276,7 +1516,7 @@ export default function AdminLiveScoring() {
                     value={fielderName}
                     disabled={saving}
                     onChange={(value) => { setFielderName(value); setFielderId(""); }}
-                    onSelect={p => { setFielderName(p.name); setFielderId(p._id || ""); }}
+                    onSelect={p => { setFielderName(playerNameOf(p)); setFielderId(playerIdOf(p)); }}
                     fetchFn={async q => {
                       const localHits = currentBowlingRoster.filter(p => p.name.toLowerCase().includes(q.toLowerCase()));
                       if (localHits.length > 0) return localHits;
@@ -1289,7 +1529,7 @@ export default function AdminLiveScoring() {
                 </motion.div>
               )}
 
-              <button disabled={saving || !wicketSelectionReady} onClick={() => {
+              <button disabled={saving || !wicketSelectionReady || (freeHitPending && !wicketIsNonDelivery)} onClick={() => {
                 void quickBall(wicketMayIncludeRuns ? wicketRuns : 0, extraMRMCfier, true, outPlayer, wicketType, fielderName, fielderId);
               }}
                 className="w-full py-6 rounded-3xl bg-red-600 text-white font-black uppercase tracking-widest shadow-2xl shadow-red-900/50 hover:bg-red-500 transition-all active:scale-95 disabled:opacity-20">

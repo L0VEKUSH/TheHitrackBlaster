@@ -6,11 +6,13 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 
 const Match = require("../models/Match");
+const Player = require("../models/Player");
 const { Admin } = require("../models/other");
 const playerController = require("../controllers/playerController");
 const liveScoringController = require("../controllers/liveScoringController");
 const matchRoutes = require("../routes/matchRoutes");
 const {
+  BALL,
   ADD_BATTER,
   ADD_BOWLER,
   END_INNINGS,
@@ -24,13 +26,45 @@ const {
 const FIXED_TIME = "2026-08-30T12:00:00.000Z";
 const MATCH_ID = "507f1f77bcf86cd799439011";
 
+const playerIdsByName = new Map();
+const playerNamesById = new Map();
+const playerIdForName = (name) => {
+  if (!playerIdsByName.has(name)) {
+    const suffix = (playerIdsByName.size + 100).toString(16).padStart(8, "0");
+    const playerId = `507f1f77bcf86cd7${suffix}`;
+    playerIdsByName.set(name, playerId);
+    playerNamesById.set(playerId, name);
+  }
+  return playerIdsByName.get(name);
+};
+
+const participantForName = (name) => ({
+  playerId: playerIdForName(name),
+  nameSnapshot: name,
+});
+
+const playingXIForNames = (names, substitutes = []) => ({
+  playingXI: names.map(participantForName),
+  substitutes: substitutes.map(participantForName),
+});
+
 // Completed scoring mutations schedule a derived-stat rebuild. Stub that external
 // database job so this controller suite remains hermetic and never opens MongoDB.
 const originalRebuildAllPlayerStats = playerController.rebuildAllPlayerStats;
+const originalPlayerFindById = Player.findById;
 playerController.rebuildAllPlayerStats = async () => {};
+Player.findById = (playerId) => ({
+  select() { return this; },
+  async lean() {
+    const id = String(playerId);
+    const name = playerNamesById.get(id);
+    return name ? { _id: id, name } : null;
+  },
+});
 after(async () => {
   await new Promise((resolve) => setImmediate(resolve));
   playerController.rebuildAllPlayerStats = originalRebuildAllPlayerStats;
+  Player.findById = originalPlayerFindById;
 });
 
 class EventHistory {
@@ -59,6 +93,8 @@ class EventHistory {
     const event = createControlEvent(ADD_BATTER, {
       ...this.metadata("setup-batter"),
       name,
+      playerId: playerIdForName(name),
+      nameSnapshot: name,
       isStriker,
     });
     this.events.push(event);
@@ -69,6 +105,8 @@ class EventHistory {
     const event = createControlEvent(ADD_BOWLER, {
       ...this.metadata("setup-bowler"),
       name,
+      playerId: playerIdForName(name),
+      nameSnapshot: name,
     });
     this.events.push(event);
     return event;
@@ -90,8 +128,11 @@ class EventHistory {
     const event = canonicalizeBallEvent({
       ...this.metadata("history-ball"),
       batterName: striker,
+      batterId: active.find((item) => item.name === striker)?.playerId || playerIdForName(striker),
       nonStrikerName: input.nonStrikerName || active.find((item) => item.name !== striker)?.name,
+      nonStrikerId: active.find((item) => item.name !== striker)?.playerId || "",
       bowlerName: input.bowlerName || state.currentBowler,
+      bowlerId: state.bowlers.find((item) => item.name === (input.bowlerName || state.currentBowler))?.playerId || "",
       batsmanRuns: 0,
       extraRuns: 0,
       ...input,
@@ -414,7 +455,7 @@ describe("liveScoringController without a database", { concurrency: false }, () 
           extraType: "bonus",
           batterName: "Outside Batter",
         },
-        expectedCode: "INVALID_BATTER",
+        expectedCode: "INVALID_ADJUSTMENT",
       },
       {
         actionId: "invalid-retirement-bowler-0001",
@@ -446,6 +487,253 @@ describe("liveScoringController without a database", { concurrency: false }, () 
         assert.equal(invalidMatch.saveCount, 0);
       });
     }
+  });
+
+  test("configured Playing XIs reject substitutes and non-XI bowlers", async () => {
+    const batterMatch = makeLiveDocument({
+      teamAPlayingXI: playingXIForNames(
+        ["Team A Batter 1", "Team A Reserve"],
+        ["Team A Batter 2"],
+      ),
+      teamBPlayingXI: playingXIForNames(["Team B Bowler 1", "Team B Reserve"]),
+    });
+
+    await withFindById(async () => batterMatch, async () => {
+      const response = responseRecorder();
+      await liveScoringController.updateScore(scoreRequest({
+        actionId: "reject-substitute-batter-0001",
+        expectedVersion: 0,
+      }), response);
+
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.body.code, "PLAYER_NOT_IN_PLAYING_XI");
+      assert.match(response.body.message, /cannot bat/i);
+      assert.equal(batterMatch.saveCount, 0);
+    });
+
+    const bowlerMatch = makeLiveDocument({
+      teamAPlayingXI: playingXIForNames(["Team A Batter 1", "Team A Batter 2"]),
+      teamBPlayingXI: playingXIForNames(
+        ["Team B Reserve 1", "Team B Reserve 2"],
+        ["Team B Bowler 1"],
+      ),
+    });
+
+    await withFindById(async () => bowlerMatch, async () => {
+      const response = responseRecorder();
+      await liveScoringController.updateScore(scoreRequest({
+        actionId: "reject-substitute-bowler-0001",
+        expectedVersion: 0,
+      }), response);
+
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.body.code, "PLAYER_NOT_IN_PLAYING_XI");
+      assert.match(response.body.message, /cannot bowl/i);
+      assert.equal(bowlerMatch.saveCount, 0);
+    });
+  });
+
+  test("new scoring requires existing player IDs and duplicate names require explicit confirmation", async () => {
+    const missingIdMatch = makeLiveDocument();
+    const firstBatterEvent = missingIdMatch.innings1.events.find((event) => event.type === ADD_BATTER);
+    firstBatterEvent.playerId = "";
+
+    await withFindById(async () => missingIdMatch, async () => {
+      const response = responseRecorder();
+      await liveScoringController.updateScore(scoreRequest({
+        actionId: "reject-missing-player-id-0001",
+        expectedVersion: 0,
+      }), response);
+
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.body.code, "PLAYER_ID_REQUIRED");
+      assert.equal(missingIdMatch.saveCount, 0);
+    });
+
+    const unknownIdMatch = makeLiveDocument();
+    const unknownBatterEvent = unknownIdMatch.innings1.events.find((event) => event.type === ADD_BATTER);
+    unknownBatterEvent.playerId = "507f1f77bcf86cd7deadbeef";
+
+    await withFindById(async () => unknownIdMatch, async () => {
+      const response = responseRecorder();
+      await liveScoringController.updateScore(scoreRequest({
+        actionId: "reject-unknown-player-id-0001",
+        expectedVersion: 0,
+      }), response);
+
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.body.code, "PLAYER_NOT_FOUND");
+      assert.equal(unknownIdMatch.saveCount, 0);
+    });
+
+    const duplicateNameMatch = makeLiveDocument();
+    const batterEvents = duplicateNameMatch.innings1.events.filter((event) => event.type === ADD_BATTER);
+    batterEvents[1].playerName = batterEvents[0].playerName;
+    batterEvents[1].nameSnapshot = batterEvents[0].nameSnapshot;
+
+    await withFindById(async () => duplicateNameMatch, async () => {
+      const ambiguousResponse = responseRecorder();
+      await liveScoringController.updateScore(scoreRequest({
+        actionId: "duplicate-name-needs-id-0001",
+        expectedVersion: 0,
+      }), ambiguousResponse);
+
+      assert.equal(ambiguousResponse.statusCode, 409);
+      assert.equal(ambiguousResponse.body.code, "PLAYER_CONFIRMATION_REQUIRED");
+      assert.equal(ambiguousResponse.body.details.candidates.length, 2);
+      assert.notEqual(
+        ambiguousResponse.body.details.candidates[0].playerId,
+        ambiguousResponse.body.details.candidates[1].playerId,
+      );
+      assert.equal(duplicateNameMatch.saveCount, 0);
+
+      const confirmedResponse = responseRecorder();
+      await liveScoringController.updateScore(request({
+        headers: {
+          "Idempotency-Key": "duplicate-name-confirmed-0001",
+          "If-Match-Version": 0,
+        },
+        body: {
+          inningsNum: 1,
+          batterName: batterEvents[0].nameSnapshot,
+          batterId: batterEvents[0].playerId,
+          nonStrikerName: batterEvents[1].nameSnapshot,
+          nonStrikerId: batterEvents[1].playerId,
+          bowlerName: "Team B Bowler 1",
+          bowlerId: playerIdForName("Team B Bowler 1"),
+          batsmanRuns: 1,
+          extraRuns: 0,
+        },
+      }), confirmedResponse);
+
+      assert.equal(confirmedResponse.statusCode, 200);
+      assert.equal(confirmedResponse.body.match.innings1.runs, 1);
+      assert.equal(duplicateNameMatch.saveCount, 1);
+    });
+  });
+
+  test("a no-ball creates an authoritative free hit and a delivery wicket cannot be saved", async () => {
+    const match = makeLiveDocument();
+
+    await withFindById(async () => match, async () => {
+      const noBallResponse = responseRecorder();
+      await liveScoringController.updateScore(request({
+        headers: {
+          "Idempotency-Key": "controller-no-ball-free-hit-0001",
+          "If-Match-Version": 0,
+        },
+        body: {
+          inningsNum: 1,
+          batterName: "Team A Batter 1",
+          nonStrikerName: "Team A Batter 2",
+          bowlerName: "Team B Bowler 1",
+          batsmanRuns: 0,
+          extraRuns: 1,
+          extraType: "noBall",
+          isFreeHit: true,
+        },
+      }), noBallResponse);
+
+      assert.equal(noBallResponse.statusCode, 200);
+      assert.equal(noBallResponse.body.freeHitPending, true);
+      assert.equal(noBallResponse.body.match.innings1.freeHitPending, true);
+      assert.equal(match.innings1.events.at(-1).isFreeHit, false, "the no-ball itself is not the resulting free hit");
+
+      const wicketResponse = responseRecorder();
+      await liveScoringController.updateScore(request({
+        headers: {
+          "Idempotency-Key": "controller-free-hit-wicket-0001",
+          "If-Match-Version": 1,
+        },
+        body: {
+          inningsNum: 1,
+          batterName: "Team A Batter 1",
+          nonStrikerName: "Team A Batter 2",
+          bowlerName: "Team B Bowler 1",
+          batsmanRuns: 0,
+          extraRuns: 0,
+          isWicket: true,
+          wicketType: "bowled",
+          outPlayerName: "Team A Batter 1",
+          isFreeHit: false,
+        },
+      }), wicketResponse);
+
+      assert.equal(wicketResponse.statusCode, 422);
+      assert.equal(wicketResponse.body.code, "WICKET_ON_FREE_HIT");
+      assert.equal(match.saveCount, 1);
+      assert.equal(match.innings1.wickets, 0);
+      assert.equal(match.innings1.events.filter((event) => event.type === BALL).length, 1);
+
+      const legalResponse = responseRecorder();
+      await liveScoringController.updateScore(request({
+        headers: {
+          "Idempotency-Key": "controller-free-hit-legal-0001",
+          "If-Match-Version": 1,
+        },
+        body: {
+          inningsNum: 1,
+          batterName: "Team A Batter 1",
+          nonStrikerName: "Team A Batter 2",
+          bowlerName: "Team B Bowler 1",
+          batsmanRuns: 0,
+          extraRuns: 0,
+          isFreeHit: false,
+        },
+      }), legalResponse);
+
+      assert.equal(legalResponse.statusCode, 200);
+      assert.equal(legalResponse.body.freeHitPending, false);
+      assert.equal(match.innings1.events.at(-1).isFreeHit, true, "the server ignores a spoofed client marker");
+    });
+  });
+
+  test("Playing XI length drives each side's wicket limit and chase margin", () => {
+    const first = new EventHistory({ battingTeam: "Team A", bowlingTeam: "Team B", inningsNumber: 1 });
+    first.ball({ batsmanRuns: 5 });
+    first.end();
+
+    const second = new EventHistory({
+      battingTeam: "Team B",
+      bowlingTeam: "Team A",
+      inningsNumber: 2,
+      startSequence: first.sequence,
+    });
+    const dismissedName = "Team B Batter 1";
+    second.ball({
+      isWicket: true,
+      wicketType: "bowled",
+      outPlayerName: dismissedName,
+      outPlayerId: playerIdForName(dismissedName),
+    });
+    second.addBatter("Team B Batter 3", true);
+    second.ball({ batsmanRuns: 6 });
+
+    const match = makeDocument({
+      innings1: first.project(),
+      innings2: second.project({ target: 6 }),
+      currentInnings: 2,
+      eventSequence: second.sequence,
+      teamAPlayingXI: playingXIForNames([
+        "Team A Batter 1",
+        "Team A Batter 2",
+        "Team A Bowler 1",
+      ]),
+      teamBPlayingXI: playingXIForNames([
+        "Team B Batter 1",
+        "Team B Batter 2",
+        "Team B Batter 3",
+        "Team B Bowler 1",
+        "Team B Reserve",
+      ]),
+    });
+
+    assert.equal(liveScoringController._test.matchLimits(match, { battingTeam: "Team A" }).maxWickets, 2);
+    assert.equal(liveScoringController._test.matchLimits(match, { battingTeam: "Team B" }).maxWickets, 4);
+    liveScoringController._test.synchronizeMatch(match);
+    assert.equal(match.status, "completed");
+    assert.equal(match.innings2.wickets, 1);
+    assert.equal(match.result, "Team B won by 3 wickets");
   });
 
   test("undoing and redoing a winning ball transitions completed -> live -> completed atomically", async () => {

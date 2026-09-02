@@ -10,17 +10,23 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token      = localStorage.getItem("cs_token");
+    const userToken  = localStorage.getItem("cs_user_token");
+    const adminToken = localStorage.getItem("cs_admin_token");
     const saved      = localStorage.getItem("cs_user");
     const savedAdmin = localStorage.getItem("cs_admin");
-    if (token && saved)      setUser(JSON.parse(saved));
-    if (token && savedAdmin) setAdmin(JSON.parse(savedAdmin));
+    if (userToken && saved)      setUser(JSON.parse(saved));
+    if (adminToken && savedAdmin) setAdmin(JSON.parse(savedAdmin));
     setLoading(false);
   }, []);
 
   const login = async (email, password) => {
     const { data } = await authAPI.login({ email, password });
-    localStorage.setItem("cs_token", data.token);
+    // Clear any stale admin token/state
+    localStorage.removeItem("cs_admin_token");
+    localStorage.removeItem("cs_admin");
+    setAdmin(null);
+    // Set user token and data
+    localStorage.setItem("cs_user_token", data.token);
     localStorage.setItem("cs_user",  JSON.stringify(data.user));
     setUser(data.user);
     return data;
@@ -28,7 +34,12 @@ export function AuthProvider({ children }) {
 
   const adminLogin = async (email, password) => {
     const { data } = await authAPI.adminLogin({ email, password });
-    localStorage.setItem("cs_token", data.token);
+    // Clear any stale user token/state
+    localStorage.removeItem("cs_user_token");
+    localStorage.removeItem("cs_user");
+    setUser(null);
+    // Set admin token and data
+    localStorage.setItem("cs_admin_token", data.token);
     localStorage.setItem("cs_admin", JSON.stringify(data.admin));
     setAdmin(data.admin);
     return data;
@@ -36,14 +47,20 @@ export function AuthProvider({ children }) {
 
   const register = async (name, email, password) => {
     const { data } = await authAPI.register({ name, email, password });
-    localStorage.setItem("cs_token", data.token);
+    // Clear any stale admin token/state
+    localStorage.removeItem("cs_admin_token");
+    localStorage.removeItem("cs_admin");
+    setAdmin(null);
+    // Set user token and data
+    localStorage.setItem("cs_user_token", data.token);
     localStorage.setItem("cs_user",  JSON.stringify(data.user));
     setUser(data.user);
     return data;
   };
 
   const logout = () => {
-    localStorage.removeItem("cs_token");
+    localStorage.removeItem("cs_user_token");
+    localStorage.removeItem("cs_admin_token");
     localStorage.removeItem("cs_user");
     localStorage.removeItem("cs_admin");
     setUser(null);

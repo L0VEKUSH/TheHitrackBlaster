@@ -1,10 +1,23 @@
 // server/controllers/matchController.js
 const Match      = require("../models/Match");
 const mongoose   = require("mongoose");
+const Player     = require("../models/Player");
 const { getLivePredictions } = require("../ai/predictionEngine");
 const { Tournament } = require("../models/other");
 const { rebuildAllPlayerStats } = require("./playerController");
 const { serializeMatch } = require("../services/matchSerializer");
+const {
+  participantIds,
+  playerIdOf,
+  resolveParticipantEntries,
+  snapshotOf,
+} = require("../utils/playingXIResolver");
+const {
+  getMaxWicketsFromPlayingXI,
+  getPlayingXIForTeam,
+  normalizeParticipant,
+  participantKey,
+} = require("../utils/playerIdentity");
 
 let _io;
 exports.setSocket = (io) => { _io = io; };
@@ -57,6 +70,198 @@ exports.getLiveMatches = async (req, res) => {
       .lean();
     res.json({ success: true, matches: matches.map(serializeMatch) });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+const PLAYING_XI_SIDES = ["teamAPlayingXI", "teamBPlayingXI"];
+
+const maxWicketsForTeam = (match, team) => getMaxWicketsFromPlayingXI(
+  getPlayingXIForTeam(match, team, { legacyFallback: false }),
+  10,
+);
+
+const duplicateIds = (participants) => {
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const participant of participants || []) {
+    const playerId = String(participant?.playerId || "");
+    if (!playerId) continue;
+    if (seen.has(playerId)) duplicates.add(playerId);
+    seen.add(playerId);
+  }
+  return [...duplicates];
+};
+
+const preparePlayingXI = ({ side, input, players, selectedAt }) => {
+  const validationIssues = [];
+  const resolutionIssues = [];
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      roster: null,
+      validationIssues: [{ side, code: "INVALID_PLAYING_XI", message: `${side} must be an object` }],
+      resolutionIssues,
+    };
+  }
+
+  const playingXI = input.playingXI;
+  const substitutes = input.substitutes == null ? [] : input.substitutes;
+  if (!Array.isArray(playingXI)) {
+    validationIssues.push({ side, list: "playingXI", code: "PLAYING_XI_REQUIRED", message: "playingXI must be an array" });
+  } else if (playingXI.length < 2 || playingXI.length > 11) {
+    validationIssues.push({ side, list: "playingXI", code: "INVALID_PLAYING_XI_SIZE", message: "playingXI must contain between 2 and 11 players" });
+  }
+  if (!Array.isArray(substitutes)) {
+    validationIssues.push({ side, list: "substitutes", code: "INVALID_SUBSTITUTES", message: "substitutes must be an array" });
+  }
+  if (validationIssues.length > 0) return { roster: null, validationIssues, resolutionIssues };
+
+  const resolvedXI = resolveParticipantEntries({ entries: playingXI, players, side, list: "playingXI" });
+  const resolvedSubstitutes = resolveParticipantEntries({ entries: substitutes, players, side, list: "substitutes" });
+  validationIssues.push(...resolvedXI.validationIssues, ...resolvedSubstitutes.validationIssues);
+  resolutionIssues.push(...resolvedXI.resolutionIssues, ...resolvedSubstitutes.resolutionIssues);
+
+  const xiDuplicates = duplicateIds(resolvedXI.participants);
+  const substituteDuplicates = duplicateIds(resolvedSubstitutes.participants);
+  if (xiDuplicates.length > 0) {
+    validationIssues.push({ side, list: "playingXI", code: "DUPLICATE_PLAYING_XI_PLAYER", message: "playingXI contains duplicate players", playerIds: xiDuplicates });
+  }
+  if (substituteDuplicates.length > 0) {
+    validationIssues.push({ side, list: "substitutes", code: "DUPLICATE_SUBSTITUTE", message: "substitutes contains duplicate players", playerIds: substituteDuplicates });
+  }
+
+  const xiIds = new Set(participantIds(resolvedXI.participants));
+  const rosterOverlap = participantIds(resolvedSubstitutes.participants).filter((playerId) => xiIds.has(playerId));
+  if (rosterOverlap.length > 0) {
+    validationIssues.push({ side, code: "PLAYING_XI_SUBSTITUTE_OVERLAP", message: "A substitute cannot also be in the Playing XI", playerIds: [...new Set(rosterOverlap)] });
+  }
+
+  const playersById = new Map((players || []).map((player) => [playerIdOf(player), player]));
+  const validateRole = (field, label) => {
+    const playerId = String(input[field] || "").trim();
+    if (!playerId) return { playerId: "", nameSnapshot: "" };
+    if (!mongoose.Types.ObjectId.isValid(playerId)) {
+      validationIssues.push({ side, field, code: "INVALID_PLAYER_ID", message: `${label} must be a valid playerId` });
+      return { playerId: "", nameSnapshot: "" };
+    }
+    if (!xiIds.has(playerId)) {
+      validationIssues.push({ side, field, code: `${field === "captainId" ? "CAPTAIN" : "WICKET_KEEPER"}_NOT_IN_PLAYING_XI`, message: `${label} must be a member of the Playing XI` });
+      return { playerId: "", nameSnapshot: "" };
+    }
+    const player = playersById.get(playerId);
+    return { playerId, nameSnapshot: snapshotOf(player) };
+  };
+
+  const captain = validateRole("captainId", "Captain");
+  const wicketKeeper = validateRole("wicketKeeperId", "Wicket keeper");
+  const roster = {
+    playingXI: resolvedXI.participants,
+    substitutes: resolvedSubstitutes.participants,
+    captainId: captain.playerId,
+    captainName: captain.nameSnapshot,
+    captainNameSnapshot: captain.nameSnapshot,
+    wicketKeeperId: wicketKeeper.playerId,
+    wicketKeeperName: wicketKeeper.nameSnapshot,
+    wicketKeeperNameSnapshot: wicketKeeper.nameSnapshot,
+    selectedAt,
+  };
+  return { roster, validationIssues, resolutionIssues };
+};
+
+const rosterPlayerIds = (roster) => new Set([
+  ...participantIds(roster?.playingXI),
+  ...participantIds(roster?.substitutes),
+]);
+
+exports.updatePlayingXI = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid Match ID", code: "INVALID_MATCH_ID" });
+    }
+    const requestedSides = PLAYING_XI_SIDES.filter((side) => Object.prototype.hasOwnProperty.call(req.body || {}, side));
+    if (requestedSides.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide teamAPlayingXI, teamBPlayingXI, or both",
+        code: "PLAYING_XI_REQUIRED",
+      });
+    }
+
+    const match = await Match.findById(req.params.id);
+    if (!match) return res.status(404).json({ success: false, message: "Match not found", code: "MATCH_NOT_FOUND" });
+    if (match.status !== "upcoming" || match.innings1) {
+      return res.status(409).json({
+        success: false,
+        message: "Playing XI cannot be changed after scoring has started",
+        code: "PLAYING_XI_LOCKED",
+      });
+    }
+
+    const players = await Player.find({}).select("_id name fullName team").lean();
+    const selectedAt = new Date();
+    const prepared = new Map();
+    const validationIssues = [];
+    const resolutionIssues = [];
+    for (const side of requestedSides) {
+      const result = preparePlayingXI({ side, input: req.body[side], players, selectedAt });
+      prepared.set(side, result.roster);
+      validationIssues.push(...result.validationIssues);
+      resolutionIssues.push(...result.resolutionIssues);
+    }
+    if (validationIssues.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Playing XI validation failed",
+        code: "INVALID_PLAYING_XI",
+        validationIssues,
+      });
+    }
+    if (resolutionIssues.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Player resolution requires confirmation",
+        code: "PLAYER_RESOLUTION_REQUIRED",
+        resolutionIssues,
+      });
+    }
+
+    const effectiveA = prepared.get("teamAPlayingXI") || match.teamAPlayingXI;
+    const effectiveB = prepared.get("teamBPlayingXI") || match.teamBPlayingXI;
+    const teamAIds = rosterPlayerIds(effectiveA);
+    const crossTeamIds = [...rosterPlayerIds(effectiveB)].filter((playerId) => teamAIds.has(playerId));
+    if (crossTeamIds.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "A player cannot be selected for both teams",
+        code: "PLAYER_ON_BOTH_TEAMS",
+        validationIssues: [{ code: "PLAYER_ON_BOTH_TEAMS", playerIds: crossTeamIds }],
+      });
+    }
+
+    for (const [side, roster] of prepared) {
+      match[side] = roster;
+      match[side === "teamAPlayingXI" ? "teamAParticipants" : "teamBParticipants"] =
+        roster.playingXI.map((participant) => ({ ...participant }));
+    }
+    const saved = await match.save();
+    emit(saved._id, saved);
+    return res.json({ success: true, match: serializeMatch(saved) });
+  } catch (err) {
+    if (err.name === "VersionError") {
+      return res.status(409).json({ success: false, message: "Match changed while the Playing XI was being edited", code: "PLAYING_XI_CONFLICT" });
+    }
+    const status = err.name === "ValidationError" || err.name === "CastError" ? 400 : 500;
+    return res.status(status).json({
+      success: false,
+      message: status === 500 ? "Unable to update Playing XI" : err.message,
+      code: status === 500 ? "PLAYING_XI_UPDATE_FAILED" : "INVALID_PLAYING_XI",
+    });
+  }
+};
+
+exports._playingXITest = {
+  duplicateIds,
+  maxWicketsForTeam,
+  preparePlayingXI,
+  rosterPlayerIds,
 };
 
 /* Admin match metadata CRUD */
@@ -241,11 +446,10 @@ function rebuildPointsTable(tournamentId) {
 
       const inn1 = m.innings1;
       const inn2 = m.innings2;
-      // BUG 10 FIX: use correct max wickets for format (super over = 2, normal = 10)
-      const maxWicketsForNRR = m.isSuperOver ? 2 : 10;
       if (inn1 && inn1.balls > 0) {
         const batTeam = inn1.battingTeam === tA ? tA : tB;
         const bowlTeam = batTeam === tA ? tB : tA;
+        const maxWicketsForNRR = maxWicketsForTeam(m, batTeam);
         let b = inn1.balls;
         if (inn1.wickets >= maxWicketsForNRR) b = (m.overs || 20) * 6;
         table[batTeam].totalRuns += inn1.runs;
@@ -256,6 +460,7 @@ function rebuildPointsTable(tournamentId) {
       if (inn2 && inn2.balls > 0) {
         const batTeam = inn2.battingTeam === tA ? tA : tB;
         const bowlTeam = batTeam === tA ? tB : tA;
+        const maxWicketsForNRR = maxWicketsForTeam(m, batTeam);
         let b = inn2.balls;
         if (inn2.wickets >= maxWicketsForNRR) b = (m.overs || 20) * 6;
         table[batTeam].totalRuns += inn2.runs;
@@ -292,7 +497,7 @@ exports.rebuildPlayerLeaderboards = async (tournamentId) => {
     const tourney = await Tournament.findById(tournamentId).populate("matches");
     if (!tourney) return null;
 
-    const agg = {}; // player -> aggregated stats
+    const agg = new Map(); // immutable playerId -> aggregated stats
 
     for (const m of tourney.matches) {
       if (!m || m.status !== "completed") continue;
@@ -305,8 +510,29 @@ exports.rebuildPlayerLeaderboards = async (tournamentId) => {
       if (!stats || !Array.isArray(stats.players)) continue;
 
       stats.players.forEach(p => {
-        if (!p || !p.name) return;
-        const dest = agg[p.name] = agg[p.name] || { name: p.name, runs: 0, balls: 0, fours: 0, sixes: 0, wickets: 0, ballsBowled: 0, runsConceded: 0, maidens: 0, points: 0 };
+        const participant = normalizeParticipant(p);
+        // Unresolved legacy name-only rows are intentionally not merged into a
+        // leaderboard. The identity migration reports them for confirmation.
+        if (!participant.playerId) return;
+        const dest = agg.get(participant.playerId) || {
+          playerId: participant.playerId,
+          _id: participant.playerId,
+          name: participant.nameSnapshot,
+          nameSnapshot: participant.nameSnapshot,
+          runs: 0,
+          balls: 0,
+          fours: 0,
+          sixes: 0,
+          wickets: 0,
+          ballsBowled: 0,
+          runsConceded: 0,
+          maidens: 0,
+          points: 0,
+        };
+        if (!dest.nameSnapshot && participant.nameSnapshot) {
+          dest.name = participant.nameSnapshot;
+          dest.nameSnapshot = participant.nameSnapshot;
+        }
         dest.runs += p.runs || 0;
         dest.balls += p.balls || 0;
         dest.fours += p.fours || 0;
@@ -316,15 +542,17 @@ exports.rebuildPlayerLeaderboards = async (tournamentId) => {
         dest.runsConceded += p.runsConceded || 0;
         dest.maidens += p.maidens || 0;
         dest.points += p.points || 0;
+        agg.set(participant.playerId, dest);
       });
     }
 
-    const players = Object.values(agg).map(p => {
+    const players = [...agg.values()].map(p => {
       const strikeRate = p.balls > 0 ? (p.runs / p.balls) * 100 : 0;
       const overs = p.ballsBowled ? (p.ballsBowled / 6) : 0;
       const economy = p.ballsBowled > 0 ? (p.runsConceded / overs) : null;
-      const average = p.runs > 0 && p.wickets > 0 ? (p.runs / p.wickets) : (p.runs || 0);
-      return Object.assign({}, p, { strikeRate: Math.round(strikeRate), economy: economy === null ? null : parseFloat(economy.toFixed(2)), overs: parseFloat(overs.toFixed(2)), average: parseFloat(average.toFixed(2)) });
+      // Bowling average = runsConceded / wickets (NOT runs / wickets)
+      const bowlingAverage = p.wickets > 0 ? (p.runsConceded / p.wickets) : null;
+      return Object.assign({}, p, { strikeRate: Math.round(strikeRate), economy: economy === null ? null : parseFloat(economy.toFixed(2)), overs: parseFloat(overs.toFixed(2)), average: bowlingAverage === null ? null : parseFloat(bowlingAverage.toFixed(2)) });
     });
 
     // Derive leaderboards
@@ -358,14 +586,39 @@ function computeMatchStatistics(match) {
     bestBowlingAverage: null,
     bestBattingAverage: null
   };
-  const players = {}; // name -> aggregated stats
+  const players = new Map(); // immutable player identity -> aggregated stats
+
+  const ensureStatisticsPlayer = (entry) => {
+    const participant = normalizeParticipant(entry);
+    const key = participantKey(participant);
+    if (!key || !participant.nameSnapshot) return null;
+    if (!players.has(key)) {
+      players.set(key, {
+        playerId: participant.playerId,
+        _id: participant.playerId || undefined,
+        name: participant.nameSnapshot,
+        nameSnapshot: participant.nameSnapshot,
+        runs: 0,
+        balls: 0,
+        fours: 0,
+        sixes: 0,
+        outs: 0,
+        wickets: 0,
+        ballsBowled: 0,
+        runsConceded: 0,
+        maidens: 0,
+        identityKey: key,
+      });
+    }
+    return players.get(key);
+  };
 
   const ingestInnings = (inn) => {
     if (!inn) return;
     if (Array.isArray(inn.batsmen)) {
       inn.batsmen.forEach(b => {
-        if (!b || !b.name) return;
-        const p = players[b.name] = players[b.name] || { name: b.name, runs: 0, balls: 0, fours: 0, sixes: 0, outs: 0, wickets: 0, ballsBowled: 0, runsConceded: 0, maidens: 0 };
+        const p = ensureStatisticsPlayer(b);
+        if (!p) return;
         p.runs += (b.runs || 0);
         p.balls += (b.balls || 0);
         p.fours += (b.fours || 0);
@@ -375,8 +628,8 @@ function computeMatchStatistics(match) {
     }
     if (Array.isArray(inn.bowlers)) {
       inn.bowlers.forEach(b => {
-        if (!b || !b.name) return;
-        const p = players[b.name] = players[b.name] || { name: b.name, runs: 0, balls: 0, fours: 0, sixes: 0, outs: 0, wickets: 0, ballsBowled: 0, runsConceded: 0, maidens: 0 };
+        const p = ensureStatisticsPlayer(b);
+        if (!p) return;
         p.wickets += (b.wickets || 0);
         p.ballsBowled += (b.balls || 0);
         p.runsConceded += (b.runs || 0);
@@ -390,24 +643,30 @@ function computeMatchStatistics(match) {
   ingestInnings(match.innings2);
 
   // Recent (finisher) stats: collect last N balls faced per player (from commentary)
-  const recentMap = {}; // name -> array of recent runs per legal ball (newest first)
+  const recentMap = new Map(); // immutable player identity -> recent legal-ball runs
   const collectRecentFrom = (inn, maxBalls = 6) => {
     if (!inn || !Array.isArray(inn.commentary)) return;
     for (const c of inn.commentary) {
       if (!c || !c.batterName) continue;
-      const name = c.batterName;
+      const participant = normalizeParticipant({
+        playerId: c.batterId,
+        nameSnapshot: c.batterNameSnapshot || c.batterName,
+      });
+      const key = participantKey(participant);
+      if (!key) continue;
       // exclude wides and no-balls for ball count
       if (c.extraType === "wide" || c.extraType === "noBall") continue;
       const runsOffBat = (c.extraType === "bye" || c.extraType === "legBye") ? 0 : (c.runs || 0);
-      recentMap[name] = recentMap[name] || [];
-      if (recentMap[name].length < maxBalls) recentMap[name].push(runsOffBat);
+      const recent = recentMap.get(key) || [];
+      if (recent.length < maxBalls) recent.push(runsOffBat);
+      recentMap.set(key, recent);
     }
   };
   collectRecentFrom(match.innings1, 6);
   collectRecentFrom(match.innings2, 6);
 
   // Calculate derived metrics and points
-  const playerList = Object.values(players).map(p => {
+  const playerList = [...players.values()].map(p => {
     const strikeRate = p.balls > 0 ? (p.runs / p.balls) * 100 : 0;
     const overs = p.ballsBowled ? (p.ballsBowled / 6) : 0;
     const oversDisplay = `${Math.floor((p.ballsBowled || 0) / 6)}.${(p.ballsBowled || 0) % 6}`;
@@ -435,7 +694,7 @@ function computeMatchStatistics(match) {
     }
 
     // Finisher bonus: player's recent strike rate in last up-to-6 balls they faced
-    const recent = recentMap[p.name] || [];
+    const recent = recentMap.get(p.identityKey) || [];
     if (recent.length >= 3) {
       const recentRuns = recent.reduce((a,b) => a + (b || 0), 0);
       const recentSR = (recentRuns / recent.length) * 100;
@@ -443,7 +702,8 @@ function computeMatchStatistics(match) {
       else if (recentSR >= 175) points += 5;
     }
 
-    return Object.assign({}, p, { strikeRate: Math.round(strikeRate), economy: economy === null ? null : parseFloat(economy.toFixed(2)), overs: oversDisplay, average: parseFloat(average.toFixed(2)), points });
+    const { identityKey: _identityKey, ...publicPlayer } = p;
+    return Object.assign({}, publicPlayer, { strikeRate: Math.round(strikeRate), economy: economy === null ? null : parseFloat(economy.toFixed(2)), overs: oversDisplay, average: parseFloat(average.toFixed(2)), points });
   });
 
   const emptyStatistics = {
@@ -486,26 +746,37 @@ function computeMatchStatistics(match) {
   // Man of the Match by points, tiebreaker wickets then runs
   const mom = playerList.slice().sort((a,b) => b.points - a.points || b.wickets - a.wickets || b.runs - a.runs)[0];
 
+  const performer = (player, fields) => player ? {
+    playerId: player.playerId || "",
+    _id: player.playerId || undefined,
+    name: player.nameSnapshot || player.name,
+    nameSnapshot: player.nameSnapshot || player.name,
+    ...Object.fromEntries(fields.map((field) => [field, player[field]])),
+  } : null;
+
   const stats = {
     players: playerList,
-    manOfTheMatch: mom ? { name: mom.name, points: mom.points, runs: mom.runs, wickets: mom.wickets, reason: mom.points } : null,
-    sixerKing: sixerKing ? { name: sixerKing.name, sixes: sixerKing.sixes } : null,
-    fourKing: fourKing ? { name: fourKing.name, fours: fourKing.fours } : null,
-    highestScore: topScore ? { name: topScore.name, runs: topScore.runs, balls: topScore.balls } : null,
-    bestBattingAverage: bestAverage ? { name: bestAverage.name, average: bestAverage.average, runs: bestAverage.runs, outs: bestAverage.outs } : null,
-    bestStrikeRate: highestStrike ? { name: highestStrike.name, strikeRate: highestStrike.strikeRate, runs: highestStrike.runs, balls: highestStrike.balls } : null,
-    highestStrikeRate: highestStrike ? { name: highestStrike.name, strikeRate: highestStrike.strikeRate, runs: highestStrike.runs, balls: highestStrike.balls } : null,
-    mostHundreds: mostHundreds ? { name: mostHundreds.name, runs: mostHundreds.runs } : null,
-    mostFifties: mostFifties ? { name: mostFifties.name, runs: mostFifties.runs } : null,
-    mostThirties: mostThirties ? { name: mostThirties.name, runs: mostThirties.runs } : null,
-    mostFours: mostFours ? { name: mostFours.name, fours: mostFours.fours } : null,
-    mostSixes: mostSixes ? { name: mostSixes.name, sixes: mostSixes.sixes } : null,
-    mostWickets: mostWickets ? { name: mostWickets.name, wickets: mostWickets.wickets, runsConceded: mostWickets.runsConceded } : null,
-    bestBowlingAverage: bestBowlingAverage ? { name: bestBowlingAverage.name, average: parseFloat((bestBowlingAverage.runsConceded / bestBowlingAverage.wickets).toFixed(2)), wickets: bestBowlingAverage.wickets, runsConceded: bestBowlingAverage.runsConceded } : null,
-    bestBowling: bestBowling ? { name: bestBowling.name, wickets: bestBowling.wickets, runsConceded: bestBowling.runsConceded } : null,
-    mostThreeWicketsHaul: mostThreeWicketsHaul ? { name: mostThreeWicketsHaul.name, wickets: mostThreeWicketsHaul.wickets, runsConceded: mostThreeWicketsHaul.runsConceded } : null,
-    mostFiveWicketsHaul: mostFiveWicketsHaul ? { name: mostFiveWicketsHaul.name, wickets: mostFiveWicketsHaul.wickets, runsConceded: mostFiveWicketsHaul.runsConceded } : null,
-    bestEconomy: bestEconomy ? { name: bestEconomy.name, economy: bestEconomy.economy, overs: bestEconomy.overs, runsConceded: bestEconomy.runsConceded, wickets: bestEconomy.wickets } : null,
+    manOfTheMatch: mom ? { ...performer(mom, ["points", "runs", "wickets"]), reason: mom.points } : null,
+    sixerKing: performer(sixerKing, ["sixes"]),
+    fourKing: performer(fourKing, ["fours"]),
+    highestScore: performer(topScore, ["runs", "balls"]),
+    bestBattingAverage: performer(bestAverage, ["average", "runs", "outs"]),
+    bestStrikeRate: performer(highestStrike, ["strikeRate", "runs", "balls"]),
+    highestStrikeRate: performer(highestStrike, ["strikeRate", "runs", "balls"]),
+    mostHundreds: performer(mostHundreds, ["runs"]),
+    mostFifties: performer(mostFifties, ["runs"]),
+    mostThirties: performer(mostThirties, ["runs"]),
+    mostFours: performer(mostFours, ["fours"]),
+    mostSixes: performer(mostSixes, ["sixes"]),
+    mostWickets: performer(mostWickets, ["wickets", "runsConceded"]),
+    bestBowlingAverage: bestBowlingAverage ? {
+      ...performer(bestBowlingAverage, ["wickets", "runsConceded"]),
+      average: parseFloat((bestBowlingAverage.runsConceded / bestBowlingAverage.wickets).toFixed(2)),
+    } : null,
+    bestBowling: performer(bestBowling, ["wickets", "runsConceded"]),
+    mostThreeWicketsHaul: performer(mostThreeWicketsHaul, ["wickets", "runsConceded"]),
+    mostFiveWicketsHaul: performer(mostFiveWicketsHaul, ["wickets", "runsConceded"]),
+    bestEconomy: performer(bestEconomy, ["economy", "overs", "runsConceded", "wickets"]),
   };
   match.statistics = stats;
   return stats;

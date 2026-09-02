@@ -4,6 +4,8 @@
  * Uses current runs, wickets, balls, and match format heuristics.
  */
 
+const { getMaxWicketsFromPlayingXI, getPlayingXIForTeam } = require("../utils/playerIdentity");
+
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const roundProbability = (value) => Math.round(clamp(value, 1, 99));
 
@@ -96,7 +98,11 @@ exports.calculateWinProbability = (match) => {
   if (!inn) return { battingTeam: 50, bowlingTeam: 50 };
 
   const overs = match.isSuperOver ? 1 : (match.overs || 20);
-  const maxWickets = match.isSuperOver ? 2 : 10;
+  const rosterWickets = getMaxWicketsFromPlayingXI(
+    getPlayingXIForTeam(match, inn.battingTeam),
+    10,
+  );
+  const maxWickets = match.isSuperOver ? Math.min(2, rosterWickets) : rosterWickets;
   const target = match.target || 0;
   const isSecondInnings = inningsNum === 2;
   const runs = inn.runs || 0;
