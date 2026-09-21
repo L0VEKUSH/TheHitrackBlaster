@@ -596,8 +596,13 @@ const validateBallAgainstState = (state, event) => {
     throw new ScoringError("The bowler cannot be changed during an over", 422, "BOWLER_CHANGE_MID_OVER");
   }
 
-  const atStartOfOver = state.balls > 0 && state.balls % 6 === 0;
-  if (atStartOfOver && sameParticipant(
+  // A bowler may bowl any number of overs. Only prevent consecutive overs.
+  // This check runs at the start of a new legal over; wides/no-balls do not complete an over.
+  const isNewLegalOver = state.balls > 0 &&
+    state.balls % 6 === 0 &&
+    event.extraType !== "wide" &&
+    event.extraType !== "noBall";
+  if (isNewLegalOver && sameParticipant(
     identityReference(state.lastOverBowlerId, state.lastOverBowler),
     bowlerReference,
   )) {

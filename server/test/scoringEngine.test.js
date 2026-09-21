@@ -294,6 +294,110 @@ describe("scoringEngine: legal deliveries and ordinary runs", () => {
   });
 });
 
+const bowlLegalOver = (innings, bowlerName) => {
+  for (let index = 0; index < 6; index += 1) {
+    innings.ball({ bowlerName, batsmanRuns: 0 });
+  }
+};
+
+describe("scoringEngine: bowler over limits", () => {
+  test("a bowler may bowl beyond the previous calculated quota", () => {
+    const innings = new InningsHarness();
+    innings.addBowler("Drew");
+
+    // Old quota for a 20-over match was Math.ceil(20 / 5) = 4 overs per bowler.
+    for (let over = 0; over < 9; over += 1) {
+      const bowlerName = over % 2 === 0 ? "Blake" : "Drew";
+      if (over > 0) innings.addBowler(bowlerName);
+      bowlLegalOver(innings, bowlerName);
+    }
+
+    const state = innings.state({ maxBalls: 120 });
+    assert.equal(bowler(state, "Blake").balls, 30);
+    assert.equal(formatOvers(bowler(state, "Blake").balls), "5.0");
+    assert.equal(bowler(state, "Drew").balls, 24);
+    assertNonNegativeScorecard(state);
+  });
+
+  test("a bowler may bowl more than three overs in short formats", () => {
+    const innings = new InningsHarness();
+    innings.addBowler("Drew");
+
+    for (let over = 0; over < 7; over += 1) {
+      const bowlerName = over % 2 === 0 ? "Blake" : "Drew";
+      if (over > 0) innings.addBowler(bowlerName);
+      bowlLegalOver(innings, bowlerName);
+    }
+
+    const state = innings.state({ maxBalls: 48 });
+    assert.equal(bowler(state, "Blake").balls, 24);
+    assert.equal(formatOvers(bowler(state, "Blake").balls), "4.0");
+    assertNonNegativeScorecard(state);
+  });
+
+  test("the engine rejects consecutive legal overs from the same bowler", () => {
+    const innings = new InningsHarness();
+    bowlLegalOver(innings, "Blake");
+
+    assert.throws(
+      () => {
+        innings.ball({ bowlerName: "Blake", batsmanRuns: 0 });
+        innings.state();
+      },
+      (error) => error instanceof ScoringError && error.code === "CONSECUTIVE_OVERS",
+    );
+  });
+
+  test("a bowler may return after another bowler completes an over", () => {
+    const innings = new InningsHarness();
+    bowlLegalOver(innings, "Blake");
+    innings.addBowler("Drew");
+    bowlLegalOver(innings, "Drew");
+    innings.addBowler("Blake");
+    bowlLegalOver(innings, "Blake");
+
+    const state = innings.state({ maxBalls: 120 });
+    assert.equal(bowler(state, "Blake").balls, 12);
+    assert.equal(bowler(state, "Drew").balls, 6);
+    assert.equal(state.lastOverBowler, "Blake");
+    assertNonNegativeScorecard(state);
+  });
+
+  test("a wide at the over boundary does not trigger consecutive-over rejection", () => {
+    const innings = new InningsHarness();
+    bowlLegalOver(innings, "Blake");
+    innings.ball({ bowlerName: "Blake", extraType: "wide", extraRuns: 1 });
+
+    const state = innings.state({ maxBalls: 120 });
+    assert.equal(state.balls, 6);
+    assert.equal(bowler(state, "Blake").balls, 6);
+    assert.equal(bowler(state, "Blake").wides, 1);
+    assert.equal(bowler(state, "Blake").runs, 1);
+    assertNonNegativeScorecard(state);
+  });
+
+  test("undo restores bowler figures after deliveries beyond the old quota", () => {
+    const innings = new InningsHarness();
+    innings.addBowler("Drew");
+
+    for (let over = 0; over < 9; over += 1) {
+      const bowlerName = over % 2 === 0 ? "Blake" : "Drew";
+      if (over > 0) innings.addBowler(bowlerName);
+      bowlLegalOver(innings, bowlerName);
+    }
+
+    const beforeUndo = innings.state({ maxBalls: 120 });
+    assert.equal(bowler(beforeUndo, "Blake").balls, 30);
+
+    innings.undo();
+    const afterUndo = innings.state({ maxBalls: 120 });
+    assert.equal(afterUndo.balls, 53);
+    assert.equal(bowler(afterUndo, "Blake").balls, 29);
+    assert.equal(bowler(afterUndo, "Blake").runs, 0);
+    assertNonNegativeScorecard(afterUndo);
+  });
+});
+
 describe("scoringEngine: extras", () => {
   test("a wide adds one run without consuming a legal ball or batter ball", () => {
     const innings = new InningsHarness();

@@ -195,7 +195,7 @@ exports.updatePlayingXI = async (req, res) => {
       });
     }
 
-    const players = await Player.find({}).select("_id name fullName team").lean();
+    const players = await Player.find({}).select("_id name fullName team role photo").lean();
     const selectedAt = new Date();
     const prepared = new Map();
     const validationIssues = [];

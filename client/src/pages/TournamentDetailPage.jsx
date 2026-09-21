@@ -35,6 +35,20 @@ function takeTop(list, n) {
   return (Array.isArray(list) ? list : []).slice(0, n);
 }
 
+function uniquePlayerIdsByName(players) {
+  const grouped = new Map();
+  (players || []).forEach((player) => {
+    const name = String(player?.name || "").trim().toLocaleLowerCase();
+    if (!name) return;
+    const ids = grouped.get(name) || [];
+    ids.push(String(player._id || player.playerId || ""));
+    grouped.set(name, ids.filter(Boolean));
+  });
+  return Object.fromEntries([...grouped.entries()]
+    .filter(([, ids]) => new Set(ids).size === 1)
+    .map(([name, ids]) => [name, ids[0]]));
+}
+
 
 // ── Aggregate stats from match data ───────────────────────────────────────
 function computeTournamentLeaders(matches) {
@@ -70,13 +84,16 @@ function computeTournamentLeaders(matches) {
       const battingTeam = normalizeName(inn.battingTeam);
 
       (Array.isArray(inn.batsmen) ? inn.batsmen : []).forEach((p) => {
-        const name = normalizeName(p?.name);
+        const name = normalizeName(p?.nameSnapshot || p?.name);
         if (!name) return;
 
-        const key = battingTeam ? `${name}||${battingTeam}` : name;
+        const playerId = String(p?.playerId || p?._id || "").trim();
+        const key = playerId ? `id:${playerId}` : (battingTeam ? `${name}||${battingTeam}` : name);
         const entry = bat[key] || {
           key,
+          playerId,
           name,
+          nameSnapshot: name,
           team: battingTeam || undefined,
           runs: 0,
           balls: 0,
@@ -106,14 +123,17 @@ function computeTournamentLeaders(matches) {
       });
 
       (Array.isArray(inn.bowlers) ? inn.bowlers : []).forEach((p) => {
-        const name = normalizeName(p?.name);
+        const name = normalizeName(p?.nameSnapshot || p?.name);
         if (!name) return;
 
         const bowlingTeam = getBowlingTeam(m, battingTeam) || undefined;
-        const key = bowlingTeam ? `${name}||${bowlingTeam}` : name;
+        const playerId = String(p?.playerId || p?._id || "").trim();
+        const key = playerId ? `id:${playerId}` : (bowlingTeam ? `${name}||${bowlingTeam}` : name);
         const entry = bowl[key] || {
           key,
+          playerId,
           name,
+          nameSnapshot: name,
           team: bowlingTeam,
           wickets: 0,
           runs: 0,
@@ -202,7 +222,7 @@ export default function TournamentDetailPage() {
 
   // Leaders state
   const [leaderCat,  setLeaderCat]  = useState("mostRuns");
-  const [playersMap, setPlayersMap] = useState({});   // name → _id
+  const [playersMap, setPlayersMap] = useState({});   // unique legacy name → _id
   const [teamsMap,   setTeamsMap]   = useState({});   // name → _id
 
   useEffect(() => {
@@ -217,23 +237,20 @@ export default function TournamentDetailPage() {
   const completed = matches.filter(m => m.status === "completed");
 
   const leaders   = computeTournamentLeaders(matches);
-  const leaderNames = [...new Set(Object.values(leaders).flatMap(list => list.map(p => p.name)))];
+  const leaderNames = [...new Set(Object.values(leaders)
+    .flatMap(list => list.filter((player) => !player.playerId).map((player) => player.name)))];
 
   // Fetch player IDs when Leaders tab opens
   useEffect(() => {
     if (tab === "leaders" && Object.keys(playersMap).length === 0 && leaderNames.length > 0) {
       playerAPI.getByNames(leaderNames)
         .then(({ data }) => {
-          const map = {};
-          (data.players || []).forEach(p => { map[p.name] = p._id; });
-          setPlayersMap(map);
+          setPlayersMap(uniquePlayerIdsByName(data.players));
         })
         .catch(() => {
           playerAPI.getAll({ limit: 500 })
             .then(({ data }) => {
-              const map = {};
-              (data.players || []).forEach(p => { map[p.name] = p._id; });
-              setPlayersMap(map);
+              setPlayersMap(uniquePlayerIdsByName(data.players));
             })
             .catch(() => {});
         });
@@ -442,12 +459,12 @@ export default function TournamentDetailPage() {
                     </thead>
                     <tbody>
                       {activeList.map((p, i) => {
-                        const pid  = playersMap[p.name];
+                        const pid  = p.playerId || playersMap[String(p.name || "").trim().toLocaleLowerCase()];
                         const val  = activeCat.getValue(p);
                         const extra = activeCat.extra(p);
                         const playerLabel = p.team ? `${p.name} • ${p.team}` : p.name;
                         return (
-                          <tr key={p.key || `${p.name}-${p.team || "unknown"}`}
+                          <tr key={p.playerId || p.key || `${p.name}-${p.team || "unknown"}`}
                             className={`border-b border-gray-800/40 transition-colors hover:bg-gray-800/30 ${i === 0 ? "bg-brand-500/5" : ""}`}
                           >
                             {/* Rank */}

@@ -77,7 +77,10 @@ const rankFuzzyCandidates = (input, players, limit = 5) => {
     const candidate = {
       playerId,
       nameSnapshot,
+      fullName: String(player.fullName || ""),
       team: String(player.team || ""),
+      role: String(player.role || ""),
+      photo: String(player.photo || ""),
       score: Number(score.toFixed(3)),
     };
     const current = byId.get(playerId);

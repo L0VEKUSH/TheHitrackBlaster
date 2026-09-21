@@ -115,6 +115,7 @@ export default function AdminLiveScoring() {
   const [newBatsman,   setNewBatsman]   = useState("");
   const [newBowler,    setNewBowler]    = useState("");
   const [bowlerName,   setBowlerName]   = useState("");
+  const [bowlerId,     setBowlerId]     = useState("");
   const [commentary,   setCommentary]   = useState("");
   const [result,       setResult]       = useState("");
   const [saving,       setSaving]       = useState(false);
@@ -307,6 +308,7 @@ export default function AdminLiveScoring() {
     setNewBowler("");
     setNewBowlerId("");
     setBowlerName("");
+    setBowlerId("");
     setRosterA([]);
     setRosterB([]);
     setShowRoster(null);
@@ -465,12 +467,14 @@ export default function AdminLiveScoring() {
   useEffect(() => {
     if (match) {
       const currentInnings = getActiveInnings(match);
+      const sameAsLastOver = currentInnings?.currentBowlerId && currentInnings?.lastOverBowlerId
+        ? currentInnings.currentBowlerId === currentInnings.lastOverBowlerId
+        : currentInnings?.currentBowler === currentInnings?.lastOverBowler;
       const overNeedsNewBowler = currentInnings && currentInnings.balls > 0 &&
-        currentInnings.balls % 6 === 0 &&
-        currentInnings.currentBowler === currentInnings.lastOverBowler;
-      setBowlerName(requireBowlerChangeRef.current || overNeedsNewBowler
-        ? ""
-        : (match.currentBowler || currentInnings?.currentBowler || ""));
+        currentInnings.balls % 6 === 0 && sameAsLastOver;
+      const clearBowler = requireBowlerChangeRef.current || overNeedsNewBowler;
+      setBowlerName(clearBowler ? "" : (match.currentBowler || currentInnings?.currentBowler || ""));
+      setBowlerId(clearBowler ? "" : (match.currentBowlerId || currentInnings?.currentBowlerId || ""));
       setResult(match.result || "");
       setNewBatsman("");
       setNewBatsmanId("");
@@ -478,7 +482,7 @@ export default function AdminLiveScoring() {
       setNewBowlerId("");
       resetWicketDraft();
       if (statistics?.manOfTheMatch?.name) {
-        setSelectedMoM(statistics.manOfTheMatch.name);
+        setSelectedMoM(statistics.manOfTheMatch.playerId || "");
       } else {
         setSelectedMoM("");
       }
@@ -513,6 +517,8 @@ export default function AdminLiveScoring() {
     const resolvedFielderId = cleanText(fId || (wkt ? fielderId : ""));
     const authoritativeInnings = getActiveInnings(matchRef.current);
     const authoritativeFreeHitPending = Boolean(authoritativeInnings?.freeHitPending);
+    const selectedBowler = (authoritativeInnings?.bowlers || []).find((bowler) =>
+      bowlerId ? playerIdOf(bowler) === bowlerId : bowler.name === bowlerName);
     if (POSITIVE_VALUE_EXTRA_TYPES.has(type) && runs < 1) {
       return flash("The selected extra must add at least one run.");
     }
@@ -528,6 +534,9 @@ export default function AdminLiveScoring() {
     }
     if (!isAdjustment && !batterName) return flash("⚠️ Select a striker first!");
     if (!isAdjustment && !isNonDeliveryWicket && !bowlerName) return flash("⚠️ Select a bowler!");
+    if (!isAdjustment && !isNonDeliveryWicket && !playerIdOf(selectedBowler)) {
+      return flash("Select the bowler by player ID before scoring.");
+    }
     if (wkt && STRIKER_ONLY_WICKET_TYPES.has(resolvedWicketType) && dismissedPlayer !== batterName) {
       return flash("That dismissal can only apply to the striker.");
     }
@@ -537,7 +546,6 @@ export default function AdminLiveScoring() {
     if (wkt && FIELDER_REQUIRED_WICKET_TYPES.has(resolvedWicketType) && !resolvedFielderId) {
       return flash("Select the fielder from the player suggestions to confirm their identity.");
     }
-    const selectedBowler = (inn?.bowlers || []).find((bowler) => bowler.name === bowlerName);
     const dismissedBatter = (inn?.batsmen || []).find((batter) => (
       outPlayerId ? playerIdOf(batter) === outPlayerId : batter.name === dismissedPlayer
     ));
@@ -566,6 +574,7 @@ export default function AdminLiveScoring() {
           if (data.isOverComplete && data.match.status !== "completed") {
             requireBowlerChangeRef.current = true;
             setBowlerName("");
+            setBowlerId("");
             flash("🔔 Over Complete! Change Bowler.");
           } else if (data.match.status === "completed") {
             flash("🏆 Match Completed!");
@@ -585,6 +594,7 @@ export default function AdminLiveScoring() {
         onSuccess: (data) => {
           requireBowlerChangeRef.current = false;
           setBowlerName(data.match.currentBowler || getActiveInnings(data.match)?.currentBowler || "");
+          setBowlerId(data.match.currentBowlerId || getActiveInnings(data.match)?.currentBowlerId || "");
           setExtraMRMCfier("");
           setCommentary("");
           resetWicketDraft();
@@ -603,6 +613,7 @@ export default function AdminLiveScoring() {
         onSuccess: (data) => {
           requireBowlerChangeRef.current = false;
           setBowlerName(data.match.currentBowler || getActiveInnings(data.match)?.currentBowler || "");
+          setBowlerId(data.match.currentBowlerId || getActiveInnings(data.match)?.currentBowlerId || "");
           setExtraMRMCfier("");
           setCommentary("");
           resetWicketDraft();
@@ -638,6 +649,7 @@ export default function AdminLiveScoring() {
         onSuccess: () => {
           requireBowlerChangeRef.current = false;
           setBowlerName("");
+          setBowlerId("");
           setCommentary("");
           setExtraMRMCfier("");
           resetWicketDraft();
@@ -656,6 +668,7 @@ export default function AdminLiveScoring() {
         onSuccess: () => {
           requireBowlerChangeRef.current = false;
           setBowlerName("");
+          setBowlerId("");
           setResult("");
           setCommentary("");
           setExtraMRMCfier("");
@@ -706,6 +719,7 @@ export default function AdminLiveScoring() {
             setNewBowler("");
             setNewBowlerId("");
             setBowlerName(name);
+            setBowlerId(playerId);
           }
         },
       },
@@ -772,7 +786,7 @@ export default function AdminLiveScoring() {
     latestDelivery?.bowlerName === inn.currentBowler);
   const currentOverHasDelivery = Boolean(inn?.balls % 6 || newOverHasIllegalDelivery);
   const canChangeBowler = inningsIsOpen && !currentOverHasDelivery;
-  const scoreInputsReady = inningsIsOpen && activeBatsmen.length === 2 && Boolean(batterName && bowlerName);
+  const scoreInputsReady = inningsIsOpen && activeBatsmen.length === 2 && Boolean(batterName && bowlerName && bowlerId);
   const adjustmentSelected = extraMRMCfier === "bonus" || extraMRMCfier === "penalty";
   const quickScoreReady = adjustmentSelected ? inningsIsOpen : scoreInputsReady;
   const freeHitPending = Boolean(inn?.freeHitPending);
@@ -787,7 +801,7 @@ export default function AdminLiveScoring() {
     outPlayer &&
     (!wicketNeedsFielder || fielderName.trim()) &&
     (!wicketNeedsFielder || fielderId) &&
-    (wicketIsNonDelivery || bowlerName) &&
+    (wicketIsNonDelivery || (bowlerName && bowlerId)) &&
     (!freeHitPending || wicketIsNonDelivery),
   );
   const inningsBallLimit = (match.isSuperOver ? 1 : Number(match.overs || 0)) * 6;
@@ -1003,12 +1017,31 @@ export default function AdminLiveScoring() {
               : [];
             const topPerformers = statPlayers.slice(0, 5);  // show top 5 for admin to pick
             const currentMoM = statistics?.manOfTheMatch;
+            const awardCandidates = [...new Map(
+              (match.innings1?.batsmen || []).concat(match.innings2?.batsmen || [])
+                .concat(match.innings1?.bowlers || []).concat(match.innings2?.bowlers || [])
+                .concat(rosterA || []).concat(rosterB || [])
+                .filter((player) => playerIdOf(player))
+                .map((player) => [playerIdOf(player), player]),
+            ).values()];
 
-            const saveMoM = async (name, points) => {
+            const saveMoM = async (player, points) => {
+              const name = playerNameOf(player);
+              const playerId = playerIdOf(player);
+              if (name && !playerId) {
+                flash("Select a player with a confirmed player ID.");
+                return;
+              }
               const reason = points !== undefined ? `${points} match pts` : 'Selected by admin';
               await runMatchMutation(
                 "SET_MAN_OF_MATCH",
-                (metadata) => matchAPI.setManOfTheMatch(id, { name, reason, ...metadata }),
+                (metadata) => matchAPI.setManOfTheMatch(id, {
+                  name,
+                  nameSnapshot: name,
+                  playerId,
+                  reason,
+                  ...metadata,
+                }),
                 {
                   successMessage: name ? `🏆 Man of the Match set — ${name}` : "Man of the Match cleared",
                   failureMessage: "Save failed",
@@ -1040,7 +1073,7 @@ export default function AdminLiveScoring() {
                       <div className="text-yellow-400 font-black text-sm">{currentMoM.name}</div>
                       <div className="text-yellow-600 text-[10px] font-bold uppercase tracking-wider">{currentMoM.reason || 'Man of the Match'}</div>
                     </div>
-                    <button disabled={saving} onClick={() => saveMoM("", "")} className="ml-auto text-[9px] text-gray-600 hover:text-red-400 font-bold uppercase transition-colors disabled:opacity-30">Clear</button>
+                    <button disabled={saving} onClick={() => saveMoM(null)} className="ml-auto text-[9px] text-gray-600 hover:text-red-400 font-bold uppercase transition-colors disabled:opacity-30">Clear</button>
                   </div>
                 )}
 
@@ -1055,13 +1088,15 @@ export default function AdminLiveScoring() {
                 {topPerformers.length > 0 ? (
                   <div className="space-y-2 mb-4">
                     {topPerformers.map((p, idx) => {
-                      const isSelected = currentMoM?.name === p.name;
+                      const isSelected = currentMoM?.playerId
+                        ? currentMoM.playerId === playerIdOf(p)
+                        : currentMoM?.name === p.name;
                       const isTiedPlayer = p.points === topPts && isTied;
                       return (
                         <button
-                          key={p.name}
+                          key={playerIdOf(p) || p.name}
                           disabled={saving}
-                          onClick={() => saveMoM(p.name, p.points)}
+                          onClick={() => saveMoM(p, p.points)}
                           className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left disabled:opacity-40 ${
                             isSelected
                               ? 'bg-yellow-500/15 border-yellow-500/40 shadow-lg shadow-yellow-500/10'
@@ -1114,22 +1149,22 @@ export default function AdminLiveScoring() {
                   <div className="flex items-center gap-2 mt-3">
                     <select value={selectedMoM} disabled={saving} onChange={e => setSelectedMoM(e.target.value)} className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-sm text-white disabled:opacity-40">
                       <option value="">Select player…</option>
-                      {[...new Map(
-                        (match.innings1?.batsmen || []).concat(match.innings2?.batsmen || [])
-                        .concat(match.innings1?.bowlers || []).concat(match.innings2?.bowlers || [])
-                        .concat(rosterA || []).concat(rosterB || [])
-                        .filter(Boolean).map(p => [p.name, p])
-                      ).values()].map(p => {
-                        const pts = statPlayers.find(sp => sp.name === p.name)?.points || 0;
+                      {awardCandidates.map(p => {
+                        const playerId = playerIdOf(p);
+                        const pts = statPlayers.find(sp => playerIdOf(sp) === playerId)?.points || 0;
+                        const identityHint = [p.team, p.role, playerId.slice(-6)].filter(Boolean).join(" · ");
                         return (
-                          <option key={p.name} value={p.name}>{p.name} ({pts} pts)</option>
+                          <option key={playerId} value={playerId}>
+                            {playerNameOf(p)} — {identityHint} ({pts} pts)
+                          </option>
                         );
                       })}
                     </select>
                     <button disabled={saving} className="btn-primary px-4 py-2 rounded-xl text-xs shrink-0 disabled:opacity-40" onClick={async () => {
                       if (!selectedMoM) return flash('Select player first');
-                      const pts = statPlayers.find(sp => sp.name === selectedMoM)?.points;
-                      await saveMoM(selectedMoM, pts);
+                      const player = awardCandidates.find(candidate => playerIdOf(candidate) === selectedMoM);
+                      const pts = statPlayers.find(sp => playerIdOf(sp) === selectedMoM)?.points;
+                      await saveMoM(player, pts);
                     }}>Set</button>
                   </div>
                 </details>
@@ -1140,20 +1175,20 @@ export default function AdminLiveScoring() {
                     <div className="flex justify-between text-gray-400">
                       <span>💥 Sixer King</span>
                       <span className="text-white font-bold">
-                        {statistics.sixerKing.name} — {statistics.sixerKing.sixes ?? 0} sixes
+                        {statistics?.sixerKing?.name} — {statistics?.sixerKing?.sixes ?? 0} sixes
                       </span>
                     </div>
                   )}
-                  {statistics?.fourKing?.name && <div className="flex justify-between text-gray-400"><span>🔥 Four King</span><span className="text-white font-bold">{statistics.fourKing.name} — {statistics.fourKing.fours ?? 0} fours</span></div>}
+                  {statistics?.fourKing?.name && <div className="flex justify-between text-gray-400"><span>🔥 Four King</span><span className="text-white font-bold">{statistics?.fourKing?.name} — {statistics?.fourKing?.fours ?? 0} fours</span></div>}
                   {(statistics?.highestStrikeRate?.name || statistics?.bestStrikeRate?.name) && (
                     <div className="flex justify-between text-gray-400">
                       <span>⚡ Best SR</span>
                       <span className="text-white font-bold">
-                        {(statistics.highestStrikeRate || statistics.bestStrikeRate).name} — {(statistics.highestStrikeRate || statistics.bestStrikeRate).strikeRate}
+                        {(statistics?.highestStrikeRate || statistics?.bestStrikeRate)?.name} — {(statistics?.highestStrikeRate || statistics?.bestStrikeRate)?.strikeRate}
                       </span>
                     </div>
                   )}
-                  {statistics?.bestEconomy?.name && <div className="flex justify-between text-gray-400"><span>🎳 Best Eco</span><span className="text-white font-bold">{statistics.bestEconomy.name} — {statistics.bestEconomy.economy}</span></div>}
+                  {statistics?.bestEconomy?.name && <div className="flex justify-between text-gray-400"><span>🎳 Best Eco</span><span className="text-white font-bold">{statistics?.bestEconomy?.name} — {statistics?.bestEconomy?.economy}</span></div>}
                 </div>
               </div>
             );
@@ -1166,8 +1201,8 @@ export default function AdminLiveScoring() {
             </div>
             <div className="space-y-3">
               {activeBatsmen.map(b => (
-                <div key={b.name} className={`flex items-center justify-between p-4 rounded-2xl transition-all ${
-                  b.name === batterName ? "bg-brand-500 text-white shadow-lg shadow-brand-900/40" : "bg-white/5 hover:bg-white/10 border border-white/5"
+                <div key={playerIdOf(b) || b.name} className={`flex items-center justify-between p-4 rounded-2xl transition-all ${
+                  sameParticipant(b, striker) ? "bg-brand-500 text-white shadow-lg shadow-brand-900/40" : "bg-white/5 hover:bg-white/10 border border-white/5"
                 } ${saving ? "opacity-60" : ""}`}>
                   <div className="flex items-center gap-3">
                     <div className={`w-2 h-2 rounded-full ${b.isStriker ? "bg-white animate-ping" : "bg-white/20"}`} />
@@ -1230,16 +1265,21 @@ export default function AdminLiveScoring() {
             {inn?.bowlers?.length > 0 && (
               <div className="space-y-2 mb-4">
                 {inn.bowlers.map(b => {
-                  const isPreviousOverBowler = inn.balls > 0 && inn.balls % 6 === 0 && b.name === inn.lastOverBowler;
+                  const isPreviousOverBowler = inn.balls > 0 && inn.balls % 6 === 0 && (
+                    inn.lastOverBowlerId
+                      ? playerIdOf(b) === inn.lastOverBowlerId
+                      : b.name === inn.lastOverBowler
+                  );
                   const unavailable = saving || !canChangeBowler || isPreviousOverBowler;
-                  return <button type="button" key={b.name} disabled={unavailable}
+                  return <button type="button" key={playerIdOf(b) || b.name} disabled={unavailable}
                     onClick={() => {
                       if (unavailable) return;
                       requireBowlerChangeRef.current = false;
                       setBowlerName(b.name);
+                      setBowlerId(playerIdOf(b));
                     }}
                     className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-left transition-all disabled:cursor-not-allowed disabled:opacity-40 ${
-                      b.name === bowlerName
+                      (bowlerId ? playerIdOf(b) === bowlerId : b.name === bowlerName)
                         ? "bg-blue-600 text-white shadow-lg shadow-blue-900/30"
                         : "bg-white/5 hover:bg-white/10 border border-white/5 text-gray-300"
                     }`}>
@@ -1427,7 +1467,8 @@ export default function AdminLiveScoring() {
             
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 max-h-[400px] overflow-y-auto pr-4 custom-scrollbar">
               {(showRoster === 'bat' ? currentBattingRoster : currentBowlingRoster).map(p => {
-                const isSelected = (showRoster === 'bat' ? inn?.batsmen : inn?.bowlers)?.some(b => b.name === p.name);
+                const isSelected = (showRoster === 'bat' ? inn?.batsmen : inn?.bowlers)
+                  ?.some((participant) => sameParticipant(participant, p));
                 return (
                   <button key={p._id || p.name} disabled={saving || isSelected} onClick={() => addFromRoster(p, showRoster)}
                     className={`p-4 rounded-2xl flex flex-col items-center gap-3 transition-all group ${

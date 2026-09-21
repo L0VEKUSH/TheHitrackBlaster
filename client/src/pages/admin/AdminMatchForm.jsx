@@ -13,6 +13,44 @@ const ROLE_COLORS = {
   "Wicket-Keeper": "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
 };
 
+const emptyRoster = () => ({
+  playingXI: [],
+  substitutes: [],
+  captainId: "",
+  wicketKeeperId: "",
+});
+
+const playerIdOf = (player) => String(player?.playerId?._id || player?.playerId || player?._id || "").trim();
+const playerNameOf = (player) => String(
+  player?.nameSnapshot || player?.name || player?.fullName || "",
+).trim();
+
+const normalizeRosterEntry = (entry) => typeof entry === "string"
+  ? { playerId: "", nameSnapshot: entry.trim(), legacyInput: true }
+  : {
+      ...entry,
+      playerId: playerIdOf(entry),
+      nameSnapshot: playerNameOf(entry),
+    };
+
+const normalizeRoster = (roster) => ({
+  playingXI: (roster?.playingXI || []).map(normalizeRosterEntry),
+  substitutes: (roster?.substitutes || []).map(normalizeRosterEntry),
+  captainId: String(roster?.captainId || ""),
+  wicketKeeperId: String(roster?.wicketKeeperId || ""),
+});
+
+const serializeRoster = (roster) => ({
+  playingXI: roster.playingXI.map((player) => playerIdOf(player)
+    ? { playerId: playerIdOf(player), nameSnapshot: playerNameOf(player) }
+    : playerNameOf(player)),
+  substitutes: roster.substitutes.map((player) => playerIdOf(player)
+    ? { playerId: playerIdOf(player), nameSnapshot: playerNameOf(player) }
+    : playerNameOf(player)),
+  captainId: roster.captainId || "",
+  wicketKeeperId: roster.wicketKeeperId || "",
+});
+
 /* ─── Small Reusables ─────────────────────────────────── */
 function Section({ title, icon, children, accent = "brand" }) {
   return (
@@ -40,6 +78,130 @@ function Field({ label, value, onChange, type = "text", placeholder = "", classN
   );
 }
 
+function PlayingXIEditor({ label, team, value, onChange, disabled }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(null);
+
+  const addPlayer = (list) => {
+    const playerId = playerIdOf(selected);
+    if (!playerId) return;
+    const alreadySelected = [...value.playingXI, ...value.substitutes]
+      .some((player) => playerIdOf(player) === playerId);
+    if (alreadySelected) return;
+    onChange({ ...value, [list]: [...value[list], normalizeRosterEntry(selected)] });
+    setQuery("");
+    setSelected(null);
+  };
+
+  const removePlayer = (list, index) => {
+    const removedId = playerIdOf(value[list][index]);
+    const next = value[list].filter((_, itemIndex) => itemIndex !== index);
+    onChange({
+      ...value,
+      [list]: next,
+      captainId: value.captainId === removedId ? "" : value.captainId,
+      wicketKeeperId: value.wicketKeeperId === removedId ? "" : value.wicketKeeperId,
+    });
+  };
+
+  const renderList = (list, title) => (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">{title}</span>
+        <span className="text-[10px] font-mono text-gray-600">{value[list].length}</span>
+      </div>
+      <div className="space-y-2 min-h-10">
+        {value[list].map((player, index) => {
+          const playerId = playerIdOf(player);
+          return (
+            <div key={playerId || `${playerNameOf(player)}-${index}`}
+              className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${
+                playerId ? "bg-white/5 border-white/5" : "bg-orange-500/10 border-orange-500/30"
+              }`}>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-black text-white truncate">{playerNameOf(player) || "Unknown player"}</div>
+                <div className="text-[9px] text-gray-500 truncate">
+                  {playerId ? [player.team, player.role, playerId.slice(-6)].filter(Boolean).join(" · ") : "Needs identity confirmation"}
+                </div>
+              </div>
+              <button type="button" disabled={disabled} onClick={() => removePlayer(list, index)}
+                className="text-gray-600 hover:text-red-400 disabled:opacity-30">×</button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-black/20 p-4 space-y-4">
+      <div>
+        <div className="text-sm font-black text-white">{label}</div>
+        <div className="text-[10px] text-gray-500 mt-0.5">{team || "Choose the team first"}</div>
+      </div>
+
+      <AutocompleteInput
+        value={query}
+        disabled={disabled || !team}
+        onChange={(next) => { setQuery(next); setSelected(null); }}
+        onSelect={(player) => { setSelected(player); setQuery(playerNameOf(player)); }}
+        fetchFn={async (search) => {
+          const { data } = await playerAPI.getAll({ search, team, limit: 20 });
+          return data.players || [];
+        }}
+        renderItem={(player, highlighted) => {
+          const playerId = playerIdOf(player);
+          return (
+            <div className={`px-4 py-3 ${highlighted ? "bg-brand-600/30" : "hover:bg-white/5"}`}>
+              <div className="text-xs font-black text-white">{playerNameOf(player)}</div>
+              <div className="text-[10px] text-gray-500">
+                {[player.team, player.role, playerId && `ID …${playerId.slice(-6)}`].filter(Boolean).join(" · ")}
+              </div>
+            </div>
+          );
+        }}
+        placeholder="Search and confirm a player…"
+        minChars={1}
+      />
+
+      <div className="flex gap-2">
+        <button type="button" disabled={disabled || !playerIdOf(selected) || value.playingXI.length >= 11}
+          onClick={() => addPlayer("playingXI")}
+          className="flex-1 rounded-xl bg-brand-500/15 border border-brand-500/25 px-3 py-2 text-[10px] font-black uppercase text-brand-300 disabled:opacity-30">
+          Add to XI
+        </button>
+        <button type="button" disabled={disabled || !playerIdOf(selected)} onClick={() => addPlayer("substitutes")}
+          className="flex-1 rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-[10px] font-black uppercase text-gray-400 disabled:opacity-30">
+          Add substitute
+        </button>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        {renderList("playingXI", "Playing XI")}
+        {renderList("substitutes", "Substitutes")}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        {[
+          ["captainId", "Captain"],
+          ["wicketKeeperId", "Wicket keeper"],
+        ].map(([field, fieldLabel]) => (
+          <div key={field}>
+            <label className="block text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">{fieldLabel}</label>
+            <select value={value[field]} disabled={disabled} onChange={(event) => onChange({ ...value, [field]: event.target.value })}
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white disabled:opacity-30">
+              <option value="">— Not selected —</option>
+              {value.playingXI.filter((player) => playerIdOf(player)).map((player) => (
+                <option key={playerIdOf(player)} value={playerIdOf(player)}>{playerNameOf(player)}</option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ─── Main Form ───────────────────────────────────────── */
 export default function AdminMatchForm() {
   const { id }    = useParams();
@@ -58,6 +220,13 @@ export default function AdminMatchForm() {
   const [loading,     setLoading]     = useState(false);
   const [saving,      setSaving]      = useState(false);
   const [error,       setError]       = useState("");
+  const [rosters, setRosters] = useState({
+    teamAPlayingXI: emptyRoster(),
+    teamBPlayingXI: emptyRoster(),
+  });
+  const [rosterLocked, setRosterLocked] = useState(false);
+  const [resolutionIssues, setResolutionIssues] = useState([]);
+  const [persistedMatchId, setPersistedMatchId] = useState("");
 
   useEffect(() => {
     tournamentAPI.getAll().then(({ data }) => setTournaments(data.tournaments || []));
@@ -78,6 +247,11 @@ export default function AdminMatchForm() {
           status: m.status||"upcoming",
           videoUrl: m.videoUrl||"",
         });
+        setRosters({
+          teamAPlayingXI: normalizeRoster(m.teamAPlayingXI),
+          teamBPlayingXI: normalizeRoster(m.teamBPlayingXI),
+        });
+        setRosterLocked(m.status !== "upcoming" || Boolean(m.innings1));
       }).finally(() => setLoading(false));
     }
   }, [id]);
@@ -87,16 +261,65 @@ export default function AdminMatchForm() {
   const submit = async (e) => {
     e.preventDefault();
     if (!form.teamA || !form.teamB) { setError("Both team names are required"); return; }
+    const rosterConfigured = [rosters.teamAPlayingXI, rosters.teamBPlayingXI]
+      .some((roster) => roster.playingXI.length > 0 || roster.substitutes.length > 0);
+    if (rosterConfigured && !rosterLocked) {
+      for (const [teamLabel, roster] of [
+        [form.teamA || "Team A", rosters.teamAPlayingXI],
+        [form.teamB || "Team B", rosters.teamBPlayingXI],
+      ]) {
+        if (roster.playingXI.length < 2 || roster.playingXI.length > 11) {
+          setError(`${teamLabel} must have between 2 and 11 Playing XI members`);
+          return;
+        }
+      }
+    }
     setSaving(true); setError("");
     try {
       const payload = { ...form, overs: Number(form.overs)||20 };
       if (!payload.tournament) delete payload.tournament;
-      if (isEdit) await matchAPI.update(id, payload);
-      else        await matchAPI.create(payload);
+      let targetMatchId = id || persistedMatchId;
+      if (targetMatchId) {
+        await matchAPI.update(targetMatchId, payload);
+      } else {
+        const { data } = await matchAPI.create(payload);
+        targetMatchId = data.match?._id || data.match?.id;
+        setPersistedMatchId(targetMatchId || "");
+      }
+      if (rosterConfigured && !rosterLocked) {
+        await matchAPI.updatePlayingXI(targetMatchId, {
+          teamAPlayingXI: serializeRoster(rosters.teamAPlayingXI),
+          teamBPlayingXI: serializeRoster(rosters.teamBPlayingXI),
+        });
+      }
+      setResolutionIssues([]);
       navigate("/admin/matches");
     } catch (err) {
-      setError(err.response?.data?.message || "Failed to save match");
+      const response = err.response?.data;
+      if (response?.code === "PLAYER_RESOLUTION_REQUIRED" && Array.isArray(response.resolutionIssues)) {
+        setResolutionIssues(response.resolutionIssues);
+        setError("Confirm each ambiguous or fuzzy player below, then save again.");
+      } else {
+        const details = Array.isArray(response?.validationIssues)
+          ? response.validationIssues.map((issue) => issue.message).filter(Boolean).join("; ")
+          : "";
+        setError(details || response?.message || "Failed to save match");
+      }
     } finally { setSaving(false); }
+  };
+
+  const applyResolution = (issue, candidate) => {
+    if (!issue?.side || !issue?.list || !Number.isInteger(issue.index)) return;
+    setRosters((current) => {
+      const side = current[issue.side];
+      if (!side || !Array.isArray(side[issue.list])) return current;
+      const list = [...side[issue.list]];
+      list[issue.index] = normalizeRosterEntry(candidate);
+      return { ...current, [issue.side]: { ...side, [issue.list]: list } };
+    });
+    setResolutionIssues((current) => current.filter((item) => !(
+      item.side === issue.side && item.list === issue.list && item.index === issue.index
+    )));
   };
 
   if (loading) return (
@@ -106,7 +329,7 @@ export default function AdminMatchForm() {
   );
 
   return (
-    <div className="max-w-3xl">
+    <div className="max-w-6xl">
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
         <button onClick={() => navigate("/admin/matches")}
@@ -228,6 +451,76 @@ export default function AdminMatchForm() {
         </Section>
 
         {/* ── Venue & Schedule ── */}
+        <Section title="Playing XI & Match Roster" icon="👥">
+          <div className="space-y-5">
+            {rosterLocked && (
+              <div className="rounded-xl border border-orange-500/25 bg-orange-500/10 px-4 py-3 text-xs text-orange-300">
+                Playing XIs are locked because scoring has started. Existing selections remain visible but cannot be changed.
+              </div>
+            )}
+
+            {resolutionIssues.length > 0 && (
+              <div className="rounded-2xl border border-orange-500/30 bg-orange-950/30 p-4 space-y-4">
+                <div>
+                  <div className="text-xs font-black text-orange-300 uppercase tracking-widest">Player confirmation required</div>
+                  <div className="text-[10px] text-orange-200/60 mt-1">
+                    Fuzzy matches are suggestions only. Choose the exact player ID for every legacy name.
+                  </div>
+                </div>
+                {resolutionIssues.map((issue) => (
+                  <div key={`${issue.side}-${issue.list}-${issue.index}`} className="rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="text-xs font-black text-white">{issue.input || "Unknown legacy player"}</div>
+                    <div className="text-[9px] text-gray-500 mb-2">
+                      {issue.side === "teamAPlayingXI" ? form.teamA : form.teamB} · {issue.list} · {issue.code}
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-2">
+                      {(issue.candidates || []).map((candidate) => (
+                        <button type="button" key={candidate.playerId} onClick={() => applyResolution(issue, candidate)}
+                          className="rounded-xl border border-white/10 bg-white/5 p-3 text-left hover:border-brand-500/50 hover:bg-brand-500/10 transition-all">
+                          <div className="text-xs font-black text-white">{candidate.nameSnapshot}</div>
+                          <div className="text-[9px] text-gray-500">
+                            {[candidate.team, candidate.role, `ID …${candidate.playerId.slice(-6)}`, `match ${Math.round((candidate.score || 0) * 100)}%`]
+                              .filter(Boolean).join(" · ")}
+                          </div>
+                        </button>
+                      ))}
+                      {(issue.candidates || []).length === 0 && (
+                        <div className="text-[10px] text-red-300">No candidate found. Remove this legacy entry and select a player above.</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="grid lg:grid-cols-2 gap-4">
+              <PlayingXIEditor
+                label="Team A"
+                team={form.teamA}
+                value={rosters.teamAPlayingXI}
+                disabled={saving || rosterLocked}
+                onChange={(roster) => {
+                  setResolutionIssues([]);
+                  setRosters((current) => ({ ...current, teamAPlayingXI: roster }));
+                }}
+              />
+              <PlayingXIEditor
+                label="Team B"
+                team={form.teamB}
+                value={rosters.teamBPlayingXI}
+                disabled={saving || rosterLocked}
+                onChange={(roster) => {
+                  setResolutionIssues([]);
+                  setRosters((current) => ({ ...current, teamBPlayingXI: roster }));
+                }}
+              />
+            </div>
+            <p className="text-[10px] text-gray-600">
+              Only Playing XI members can bat or bowl. Substitutes remain visible but are not eligible for scoring.
+            </p>
+          </div>
+        </Section>
+
         <Section title="Venue & Schedule" icon="📍">
           <div className="grid grid-cols-2 gap-4">
             <Field label="Venue" value={form.venue} onChange={v => set("venue",v)} placeholder="Wankhede Stadium" />
